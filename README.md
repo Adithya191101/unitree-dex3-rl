@@ -317,26 +317,26 @@ This project establishes a strong baseline with PPO but opens the door to more e
 
 ### Diffusion Policy (DP)
 
-Replace the unimodal Gaussian policy with a **diffusion-based policy** that generates actions through iterative denoising. Dexterous manipulation is inherently multimodal — there are multiple valid finger coordination strategies for the same reorientation goal (e.g., rolling along the X-axis vs. Y-axis to reach the same target face). A Gaussian policy is forced to average over these modes, producing suboptimal "compromise" actions. Diffusion policies can capture the full distribution of viable strategies, selecting one coherent mode per rollout.
+Replace the unimodal Gaussian policy with a **diffusion-based policy** that generates actions through iterative denoising. Dexterous manipulation is inherently multimodal - there are multiple valid finger coordination strategies for the same reorientation goal (e.g., rolling along the X-axis vs. Y-axis to reach the same target face). A Gaussian policy is forced to average over these modes, producing suboptimal "compromise" actions. Diffusion policies can capture the full distribution of viable strategies, selecting one coherent mode per rollout.
 
 **Why it matters for this task**:
 - The 36 face-to-face transitions (6 start x 6 target) have geometrically distinct optimal trajectories
-- Finger gaiting requires temporally coordinated lift-hold-replace sequences — a multimodal action space naturally represents different gaiting patterns
+- Finger gaiting requires temporally coordinated lift-hold-replace sequences - a multimodal action space naturally represents different gaiting patterns
 - Contact-rich manipulation benefits from the smoother, more structured action sequences that diffusion models produce
 
 ### DPPO (Diffusion Policy Policy Optimization)
 
 **DPPO** combines diffusion policy representations with PPO-style policy gradient fine-tuning. Instead of training the diffusion policy purely from demonstrations (behavior cloning), DPPO enables direct optimization against the reward signal from simulation. This is particularly relevant here because:
 
-- **No demonstrations needed**: The current pipeline is fully self-play RL — there are no human demonstrations for this specific hand morphology. DPPO can fine-tune a diffusion policy entirely from reward, matching the existing training paradigm.
-- **Sim-to-sim transfer**: A diffusion policy's richer action distribution may generalize better across physics backends (MJX vs. CPU MuJoCo), potentially closing the 100% → 24% transfer gap that domain randomization alone could not resolve.
-- **Curriculum compatibility**: DPPO can integrate with the existing 7-phase curriculum — train a diffusion policy through progressive difficulty stages, with the denoising process adapting to each phase's reward structure.
+- **No demonstrations needed**: The current pipeline is fully self-play RL - there are no human demonstrations for this specific hand morphology. DPPO can fine-tune a diffusion policy entirely from reward, matching the existing training paradigm.
+- **Sim-to-sim transfer**: A diffusion policy's richer action distribution may generalize better across physics backends (MJX vs. CPU MuJoCo), potentially closing the 100% -> 24% transfer gap that domain randomization alone could not resolve.
+- **Curriculum compatibility**: DPPO can integrate with the existing 7-phase curriculum - train a diffusion policy through progressive difficulty stages, with the denoising process adapting to each phase's reward structure.
 
 ### Planned Architecture
 
 ```
-Current:    obs(48) → MLP(512,256,128) → Gaussian(mean, std) → action(7)
-Proposed:   obs(48) → MLP(512,256,128) → Diffusion(T=20 denoise steps) → action(7)
+Current:    obs(48) -> MLP(512,256,128) -> Gaussian(mean, std) -> action(7)
+Proposed:   obs(48) -> MLP(512,256,128) -> Diffusion(T=20 denoise steps) -> action(7)
 ```
 
 The diffusion policy would use the same observation space (48-dim) and action space (7-dim residual positions), making it a drop-in replacement for the current actor network while preserving the critic, buffer, and curriculum infrastructure.
@@ -354,33 +354,33 @@ The diffusion policy would use the same observation space (48-dim) and action sp
 
 Building an end-to-end RL pipeline for dexterous manipulation surfaced several non-obvious problems. These are documented here for anyone attempting similar work.
 
-### Actuator Instability (Days 1-2)
+### Actuator Instability
 
-The original MJCF model used **torque actuators**, which caused the hand to jitter uncontrollably — the policy couldn't learn stable grasps. Switching to **native position actuators** (`kp=5, dampratio=1`) with a residual action space (`ctrl = grip_qpos + action * scale`) was the critical fix. With `action = 0` the hand holds the dice stably, giving the policy a safe default to learn from.
+The original MJCF model used **torque actuators**, which caused the hand to jitter uncontrollably - the policy couldn't learn stable grasps. Switching to **native position actuators** (`kp=5, dampratio=1`) with a residual action space (`ctrl = grip_qpos + action * scale`) was the critical fix. With `action = 0` the hand holds the dice stably, giving the policy a safe default to learn from.
 
-### Evaluation Bias (Days 6-7)
+### Evaluation Bias
 
-The initial evaluation function ran 64 parallel envs with mixed target faces and counted the **first 20 episodes to finish**. This created a severe selection bias: successful episodes terminate early (goal reached), so they were overrepresented. The metric showed **100% success rate** while the true per-face rate was **33-40%**. The fix was `evaluate_per_face()` — run exactly N episodes per face independently. This is a subtle and devastating bug; it makes failing policies look perfect.
+The initial evaluation function ran 64 parallel envs with mixed target faces and counted the **first 20 episodes to finish**. This created a severe selection bias: successful episodes terminate early (goal reached), so they were overrepresented. The metric showed **100% success rate** while the true per-face rate was **33-40%**. The fix was `evaluate_per_face()` - run exactly N episodes per face independently. This is a subtle and devastating bug. It makes failing policies look perfect.
 
-### Curriculum Collapse (Day 10)
+### Curriculum Collapse
 
-The curriculum jumped from `max_angle=0.8 rad` (Phase 3) directly to `max_angle=3.15 rad` (Phase 5). The policy went from **90% SR to 0% SR in 10 updates** and never recovered — catastrophic forgetting. The fix was adding an intermediate `MED_ROTATE` phase at `1.57 rad` (~90 degrees) to bridge the gap. Lesson: curriculum difficulty gaps greater than ~2x cause collapse.
+The curriculum jumped from `max_angle=0.8 rad` (Phase 3) directly to `max_angle=3.15 rad` (Phase 5). The policy went from **90% SR to 0% SR in 10 updates** and never recovered - catastrophic forgetting. The fix was adding an intermediate `MED_ROTATE` phase at `1.57 rad` (~90 degrees) to bridge the gap. Lesson: curriculum difficulty gaps greater than ~2x cause collapse.
 
-### Eval-Advancement Mismatch (Day 10)
+### Eval-Advancement Mismatch
 
 With `eval_interval=200` but phases advancing in 10-25 updates, evaluation **never ran** before a phase completed. The training loop fell back on noisy train SR, causing premature advancement. Fixed by setting `eval_interval=20` and adding `min_updates_override` to every phase to guarantee at least one eval before advancement can occur.
 
-### NaN Explosion on Phase Transitions (Day 8)
+### NaN Explosion on Phase Transitions
 
-When the curriculum advanced to a new phase, the observation distribution shifted abruptly. The running mean/std normalization had stale statistics, producing extreme normalized values that corrupted gradients. Fixed with an **obs normalization warmup** — collect 10 steps of observations under the new phase before any policy update.
+When the curriculum advanced to a new phase, the observation distribution shifted abruptly. The running mean/std normalization had stale statistics, producing extreme normalized values that corrupted gradients. Fixed with an **obs normalization warmup** - collect 10 steps of observations under the new phase before any policy update.
 
-### MJX-to-CPU Sim Transfer Gap (Days 5, 8-9)
+### MJX-to-CPU Sim Transfer Gap
 
 A policy trained to 100% SR in MJX (GPU physics) only achieved **21-24% SR** on CPU MuJoCo. Domain randomization on friction, mass, damping, and observation noise did **not** close this gap. The root cause is collision geometry: MJX requires primitive shapes (boxes, spheres) while the CPU model uses full mesh collisions (STL files), producing fundamentally different contact responses that parameter randomization cannot bridge.
 
-### Data Diversity Bottleneck (Days 6-7)
+### Data Diversity Bottleneck
 
-With 16 CPU envs and 36 face-to-face combinations (6 start x 6 target), each update provided only **~1.8 episodes per combination** — far too noisy for the policy to learn hard rotations (e.g., Face 5→Face 1 requires ~180 degree rotation). MJX's 2048 parallel envs solved this with **~57 episodes per combination per update**.
+With 16 CPU envs and 36 face-to-face combinations (6 start x 6 target), each update provided only **~1.8 episodes per combination** - far too noisy for the policy to learn hard rotations (e.g., Face 5->Face 1 requires ~180 degree rotation). MJX's 2048 parallel envs solved this with **~57 episodes per combination per update**.
 
 ---
 
