@@ -311,12 +311,85 @@ The MJX-trained policy achieves ~24% success rate when transferred to CPU MuJoCo
 
 ---
 
+## Future Scope
+
+This project establishes a strong baseline with PPO but opens the door to more expressive policy representations. The following directions are planned:
+
+### Diffusion Policy (DP)
+
+Replace the unimodal Gaussian policy with a **diffusion-based policy** that generates actions through iterative denoising. Dexterous manipulation is inherently multimodal — there are multiple valid finger coordination strategies for the same reorientation goal (e.g., rolling along the X-axis vs. Y-axis to reach the same target face). A Gaussian policy is forced to average over these modes, producing suboptimal "compromise" actions. Diffusion policies can capture the full distribution of viable strategies, selecting one coherent mode per rollout.
+
+**Why it matters for this task**:
+- The 36 face-to-face transitions (6 start x 6 target) have geometrically distinct optimal trajectories
+- Finger gaiting requires temporally coordinated lift-hold-replace sequences — a multimodal action space naturally represents different gaiting patterns
+- Contact-rich manipulation benefits from the smoother, more structured action sequences that diffusion models produce
+
+### DPPO (Diffusion Policy Policy Optimization)
+
+**DPPO** combines diffusion policy representations with PPO-style policy gradient fine-tuning. Instead of training the diffusion policy purely from demonstrations (behavior cloning), DPPO enables direct optimization against the reward signal from simulation. This is particularly relevant here because:
+
+- **No demonstrations needed**: The current pipeline is fully self-play RL — there are no human demonstrations for this specific hand morphology. DPPO can fine-tune a diffusion policy entirely from reward, matching the existing training paradigm.
+- **Sim-to-sim transfer**: A diffusion policy's richer action distribution may generalize better across physics backends (MJX vs. CPU MuJoCo), potentially closing the 100% → 24% transfer gap that domain randomization alone could not resolve.
+- **Curriculum compatibility**: DPPO can integrate with the existing 7-phase curriculum — train a diffusion policy through progressive difficulty stages, with the denoising process adapting to each phase's reward structure.
+
+### Planned Architecture
+
+```
+Current:    obs(48) → MLP(512,256,128) → Gaussian(mean, std) → action(7)
+Proposed:   obs(48) → MLP(512,256,128) → Diffusion(T=20 denoise steps) → action(7)
+```
+
+The diffusion policy would use the same observation space (48-dim) and action space (7-dim residual positions), making it a drop-in replacement for the current actor network while preserving the critic, buffer, and curriculum infrastructure.
+
+### Other Directions
+
+- **Sim-to-Real Transfer**: Deploy trained policies on physical Unitree Dex3-1 hardware with real-time inference
+- **Multi-Object Generalization**: Extend beyond dice to arbitrary convex objects (spheres, cylinders, irregular shapes)
+- **Tactile Sensing Integration**: Incorporate contact force feedback from simulated tactile sensors for closed-loop manipulation
+- **Hierarchical Policies**: High-level planner selects rotation axis, low-level controller executes finger gaiting sequences
+
+---
+
+## Challenges Faced
+
+Building an end-to-end RL pipeline for dexterous manipulation surfaced several non-obvious problems. These are documented here for anyone attempting similar work.
+
+### Actuator Instability (Days 1-2)
+
+The original MJCF model used **torque actuators**, which caused the hand to jitter uncontrollably — the policy couldn't learn stable grasps. Switching to **native position actuators** (`kp=5, dampratio=1`) with a residual action space (`ctrl = grip_qpos + action * scale`) was the critical fix. With `action = 0` the hand holds the dice stably, giving the policy a safe default to learn from.
+
+### Evaluation Bias (Days 6-7)
+
+The initial evaluation function ran 64 parallel envs with mixed target faces and counted the **first 20 episodes to finish**. This created a severe selection bias: successful episodes terminate early (goal reached), so they were overrepresented. The metric showed **100% success rate** while the true per-face rate was **33-40%**. The fix was `evaluate_per_face()` — run exactly N episodes per face independently. This is a subtle and devastating bug; it makes failing policies look perfect.
+
+### Curriculum Collapse (Day 10)
+
+The curriculum jumped from `max_angle=0.8 rad` (Phase 3) directly to `max_angle=3.15 rad` (Phase 5). The policy went from **90% SR to 0% SR in 10 updates** and never recovered — catastrophic forgetting. The fix was adding an intermediate `MED_ROTATE` phase at `1.57 rad` (~90 degrees) to bridge the gap. Lesson: curriculum difficulty gaps greater than ~2x cause collapse.
+
+### Eval-Advancement Mismatch (Day 10)
+
+With `eval_interval=200` but phases advancing in 10-25 updates, evaluation **never ran** before a phase completed. The training loop fell back on noisy train SR, causing premature advancement. Fixed by setting `eval_interval=20` and adding `min_updates_override` to every phase to guarantee at least one eval before advancement can occur.
+
+### NaN Explosion on Phase Transitions (Day 8)
+
+When the curriculum advanced to a new phase, the observation distribution shifted abruptly. The running mean/std normalization had stale statistics, producing extreme normalized values that corrupted gradients. Fixed with an **obs normalization warmup** — collect 10 steps of observations under the new phase before any policy update.
+
+### MJX-to-CPU Sim Transfer Gap (Days 5, 8-9)
+
+A policy trained to 100% SR in MJX (GPU physics) only achieved **21-24% SR** on CPU MuJoCo. Domain randomization on friction, mass, damping, and observation noise did **not** close this gap. The root cause is collision geometry: MJX requires primitive shapes (boxes, spheres) while the CPU model uses full mesh collisions (STL files), producing fundamentally different contact responses that parameter randomization cannot bridge.
+
+### Data Diversity Bottleneck (Days 6-7)
+
+With 16 CPU envs and 36 face-to-face combinations (6 start x 6 target), each update provided only **~1.8 episodes per combination** — far too noisy for the policy to learn hard rotations (e.g., Face 5→Face 1 requires ~180 degree rotation). MJX's 2048 parallel envs solved this with **~57 episodes per combination per update**.
+
+---
+
 ## Installation
 
 ```bash
 # Clone
-git clone https://github.com/<your-username>/Dex_Uni.git
-cd Dex_Uni
+git clone https://github.com/Adithya191101/unitree-dex3-rl.git
+cd unitree-dex3-rl
 
 # Install dependencies
 pip install mujoco torch numpy pyyaml tensorboard tqdm
@@ -335,9 +408,43 @@ pip install mujoco-mjx jax[cuda12]
 
 ---
 
-## References
+## References & Citations
 
-- [MuJoCo](https://mujoco.readthedocs.io/) - Physics simulation
-- [MuJoCo MJX](https://mujoco.readthedocs.io/en/stable/mjx.html) - GPU-accelerated MuJoCo via JAX
+### Core Algorithm
+
+- Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O. (2017). **"Proximal Policy Optimization Algorithms."** *arXiv:1707.06347*. [[paper]](https://arxiv.org/abs/1707.06347)
+
+### Simulation
+
+- Todorov, E., Erez, T., & Tassa, Y. (2012). **"MuJoCo: A physics engine for model-based control."** *IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)*, pp. 5026-5033. [[paper]](https://ieeexplore.ieee.org/document/6386109)
+
+- Zakka, K., Tabanpour, B., Liao, Q., et al. (2025). **"MuJoCo Playground."** *arXiv:2502.08844*. [[paper]](https://arxiv.org/abs/2502.08844) [[code]](https://github.com/google-deepmind/mujoco_playground)
+
+### Dexterous Manipulation
+
+- OpenAI, Andrychowicz, M., Baker, B., et al. (2018). **"Learning Dexterous In-Hand Manipulation."** *arXiv:1808.00177*. [[paper]](https://arxiv.org/abs/1808.00177)
+
+- OpenAI, Akkaya, I., Andrychowicz, M., et al. (2019). **"Solving Rubik's Cube with a Robot Hand."** *arXiv:1910.07113*. [[paper]](https://arxiv.org/abs/1910.07113)
+
+- Ma, X., Zhang, J., Wang, B., Huang, J., & Bao, G. (2024). **"Continuous adaptive gaits manipulation for three-fingered robotic hands via bioinspired fingertip contact events."** *Biomimetic Intelligence and Robotics*, 4(1), 100144. [[paper]](https://doi.org/10.1016/j.birob.2024.100144)
+
+### Sim-to-Real Transfer
+
+- Tobin, J., Fong, R., Ray, A., Schneider, J., Zaremba, W., & Abbeel, P. (2017). **"Domain Randomization for Transferring Deep Neural Networks from Simulation to the Real World."** *IEEE/RSJ IROS*, pp. 23-30. [[paper]](https://arxiv.org/abs/1703.06907)
+
+### Future Directions (Diffusion Policies)
+
+- Chi, C., Feng, S., Du, Y., et al. (2023). **"Diffusion Policy: Visuomotor Policy Learning via Action Diffusion."** *Robotics: Science and Systems (RSS)*. [[paper]](https://arxiv.org/abs/2303.04137)
+
+- Ren, A. Z., Lidard, J., Ankile, L. L., et al. (2024). **"Diffusion Policy Policy Optimization."** *arXiv:2409.00588*. [[paper]](https://arxiv.org/abs/2409.00588)
+
+### Related Work
+
+- Qin, Y., Huang, B., Yin, Z., Su, H., & Wang, X. (2023). **"DexPoint: Generalizable Point Cloud Reinforcement Learning for Sim-to-Real Dexterous Manipulation."** *Conference on Robot Learning (CoRL)*, PMLR 205:594-605. [[paper]](https://arxiv.org/abs/2211.09423)
+
+- Qin, Y., Wu, Y.-H., Liu, S., et al. (2022). **"DexMV: Imitation Learning for Dexterous Manipulation from Human Videos."** *European Conference on Computer Vision (ECCV)*. [[paper]](https://arxiv.org/abs/2108.05877)
+
+### Hardware & Models
+
 - [Unitree G1 / Dex3-1](https://github.com/google-deepmind/mujoco_menagerie/tree/main/unitree_g1) - Hand model from MuJoCo Menagerie
-- [MuJoCo Playground](https://github.com/google-deepmind/mujoco_playground) - Reference for MJX training patterns
+- [MuJoCo MJX](https://mujoco.readthedocs.io/en/stable/mjx.html) - GPU-accelerated MuJoCo via JAX
