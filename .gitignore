@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# Training outputs
+checkpoints/
+logs/
+*.log
+videos/
+
+# Project journal (private debugging notes)
+journal.md
+
+# Large/temporary files
+*.pt
+training_output.log
+training_status.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Spreadsheets
+*.xlsx

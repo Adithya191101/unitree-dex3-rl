@@ -1,0 +1,165 @@
+# CPU MuJoCo training — guaranteed sim-to-sim transfer
+# Uses SubprocVecEnv (64 parallel CPU envs) + GPU PPO
+env:
+  xml_path: "models/dex3_dice_scene_mjx.xml"
+  max_episode_steps: 50
+  frameskip: 10
+  action_scale: 0.3
+
+obs_dim: 48
+act_dim: 7
+
+# PPO — aggressive GPU utilization
+ppo:
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_eps: 0.2
+  value_coef: 1.0
+  entropy_coef: 0.0           # Phase-controlled
+  lr: 3.0e-4
+  lr_end: 1.0e-5
+  max_grad_norm: 0.5
+  n_epochs: 10                 # Many epochs per rollout
+  minibatch_size: 1024
+  rollout_steps: 64            # Match original — faster updates
+  total_updates: 30000
+
+# Network — large capacity
+network:
+  hidden_dims: [512, 256, 128]
+  activation: "tanh"
+  log_std_init: -2.0
+
+# Reward
+reward:
+  distance_scale: 1.0
+  progress_scale: 15.0
+  contact_bonus: 0.1
+  goal_bonus: 100.0
+  goal_threshold: 0.25
+  drop_penalty: -50.0
+  drop_height: 0.03
+
+# Training
+training:
+  seed: 42
+  checkpoint_interval: 100
+  log_interval: 5
+  eval_interval: 100
+  eval_episodes: 20
+  device: "cuda"
+  normalize_obs: true
+  n_envs: 64
+
+# 11-phase curriculum (same as MJX)
+curriculum:
+  phases:
+    - name: "HOLD"
+      max_angle: 0.0
+      faces: [1]
+      advance_threshold: 0.90
+      min_episodes: 500
+      log_std_bounds: [-4.0, -2.5]
+      entropy_coef: 0.0
+      max_episode_steps: 50
+      action_scale: 0.15
+    - name: "TINY_ROT"
+      max_angle: 0.2
+      faces: [1]
+      advance_threshold: 0.75
+      min_episodes: 800
+      log_std_bounds: [-3.5, -1.5]
+      entropy_coef: 0.001
+      max_episode_steps: 50
+      action_scale: 0.2
+    - name: "SMALL_ROT"
+      max_angle: 0.5
+      faces: [1]
+      advance_threshold: 0.55
+      min_episodes: 1000
+      log_std_bounds: [-3.0, -1.0]
+      entropy_coef: 0.003
+      max_episode_steps: 75
+      action_scale: 0.3
+    - name: "MED_ROT"
+      max_angle: 0.8
+      faces: [1]
+      advance_threshold: 0.45
+      min_episodes: 1000
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+    - name: "LARGE_ROT"
+      max_angle: 1.2
+      faces: [1]
+      advance_threshold: 0.40
+      min_episodes: 1000
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+    - name: "ADJ_SINGLE"
+      max_angle: 3.15
+      start_faces: [2]
+      faces: [1]
+      advance_threshold: 0.35
+      min_episodes: 1500
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+    - name: "ADJ_ALL"
+      max_angle: 3.15
+      start_faces: [2, 3, 4, 5]
+      faces: [1]
+      advance_threshold: 0.35
+      min_episodes: 2000
+      min_updates_override: 100
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+    - name: "ALL_STARTS"
+      max_angle: 3.15
+      start_faces: [1, 2, 3, 4, 5, 6]
+      faces: [1]
+      advance_threshold: 0.30
+      min_episodes: 2000
+      min_updates_override: 100
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+    - name: "TWO_FACES"
+      max_angle: 3.15
+      start_faces: [1, 2, 3, 4, 5, 6]
+      faces: [1, 6]
+      advance_threshold: 0.35
+      min_episodes: 2000
+      min_updates_override: 100
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+    - name: "FOUR_FACES"
+      max_angle: 3.15
+      start_faces: [1, 2, 3, 4, 5, 6]
+      faces: [1, 2, 5, 6]
+      advance_threshold: 0.30
+      min_episodes: 2000
+      min_updates_override: 100
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+    - name: "ALL_FACES"
+      max_angle: 3.15
+      start_faces: [1, 2, 3, 4, 5, 6]
+      faces: [1, 2, 3, 4, 5, 6]
+      advance_threshold: 0.90
+      min_episodes: 3000
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3

@@ -1,0 +1,73 @@
+# CPU fine-tune: adapt MJX-trained policy to CPU MuJoCo physics
+# Start from MJX checkpoint, train on CPU with low LR
+env:
+  xml_path: "models/dex3_dice_scene_torque.xml"
+  max_episode_steps: 100
+  frameskip: 10
+  action_scale: 0.3
+  use_proxy_contacts: true
+
+obs_dim: 48
+act_dim: 7
+
+ppo:
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_eps: 0.15
+  value_coef: 1.0
+  entropy_coef: 0.005
+  lr: 5.0e-5
+  lr_end: 1.0e-5
+  max_grad_norm: 0.5
+  n_epochs: 4
+  minibatch_size: 256
+  rollout_steps: 64
+  total_updates: 5000
+
+network:
+  hidden_dims: [512, 256, 128]
+  activation: "tanh"
+  log_std_init: -2.0
+
+reward:
+  distance_scale: 1.0
+  progress_scale: 15.0
+  goal_bonus: 100.0
+  goal_threshold: 0.25
+  drop_penalty: -50.0
+  drop_height: 0.03
+  gait_lift_bonus: 0.1
+  gait_replace_bonus: 0.1
+  gait_force_threshold: 0.3
+  hold_bonus: 0.05
+  action_smooth_coef: 0.01
+  contact_bonus: 0.1
+  contact_penalty_1: -0.1
+
+training:
+  seed: 42
+  checkpoint_interval: 500
+  log_interval: 10
+  eval_interval: 50
+  device: "cpu"
+  normalize_obs: true
+  n_envs: 16
+
+# Single phase — ALL_FACES fine-tune
+curriculum:
+  phases:
+    - name: "ALL_FACES_FINETUNE"
+      max_angle: 3.15
+      start_faces: [1, 2, 3, 4, 5, 6]
+      faces: [1, 2, 3, 4, 5, 6]
+      advance_threshold: 0.95
+      min_episodes: 100000
+      log_std_bounds: [-3.5, -1.0]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+      reward_overrides:
+        gait_lift_bonus: 0.1
+        gait_replace_bonus: 0.1
+        progress_scale: 15.0
+        action_smooth_coef: 0.01

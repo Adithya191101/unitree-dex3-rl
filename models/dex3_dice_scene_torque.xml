@@ -1,0 +1,195 @@
+<mujoco model="dex3_dice_reorientation_torque">
+  <compiler angle="radian" meshdir="dex3_assets/" texturedir="../assets/"/>
+  <option timestep="0.002" integrator="implicitfast"/>
+
+  <statistic center="0 0 0.15" extent="0.3"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="35" elevation="-50"/>
+  </visual>
+
+  <asset>
+    <!-- Skybox and ground -->
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+      markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+
+    <!-- Hand materials (dark/black) -->
+    <material name="hand_dark" rgba="0.1 0.1 0.1 1" specular="0.3" shininess="0.5"/>
+    <material name="hand_dark_col" rgba="0.1 0.1 0.1 1"/>
+
+    <!-- Hand meshes (Unitree Dex3-1 right hand) -->
+    <mesh file="right_wrist_yaw_link.STL"/>
+    <mesh file="right_hand_palm_link.STL"/>
+    <mesh file="right_hand_thumb_0_link.STL"/>
+    <mesh file="right_hand_thumb_1_link.STL"/>
+    <mesh file="right_hand_thumb_2_link.STL"/>
+    <mesh file="right_hand_middle_0_link.STL"/>
+    <mesh file="right_hand_middle_1_link.STL"/>
+    <mesh file="right_hand_index_0_link.STL"/>
+    <mesh file="right_hand_index_1_link.STL"/>
+
+    <!-- Dice: UV-mapped cube mesh + dot-pattern texture -->
+    <texture name="dice_tex" type="2d" file="dice_texture.png"/>
+    <material name="dice_mat" texture="dice_tex"/>
+    <mesh name="dice_mesh" file="dex_cube.obj" scale="0.02 0.02 0.02"/>
+  </asset>
+
+  <default>
+    <default class="dex3">
+      <!-- Higher damping for torque control stability -->
+      <joint armature="0.01" frictionloss="0.1" damping="0.3"/>
+      <default class="visual">
+        <geom group="2" type="mesh" contype="0" conaffinity="0" density="0" material="hand_dark"/>
+      </default>
+      <default class="collision">
+        <geom group="3" type="mesh" material="hand_dark_col" friction="0.8 0.005 0.0001" condim="4"/>
+      </default>
+    </default>
+  </default>
+
+  <worldbody>
+    <!-- Lighting -->
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <light pos="0.5 0.5 0.8" dir="-0.5 -0.5 -0.5"/>
+
+    <!-- Ground plane -->
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+    <!-- Dex3-1 hand on fixed base, palm facing up -->
+    <body name="hand_mount" pos="0 0 0.2" childclass="dex3">
+      <body name="right_wrist_yaw_link" pos="0 0 0" euler="1.5708 0 0">
+        <inertial pos="0.0885506 -0.00212216 -0.000374562" quat="0.505358 0.513241 0.493844 0.487149"
+          mass="0.457415" diaginertia="0.00105989 0.000895419 0.000323842"/>
+        <geom class="visual" mesh="right_wrist_yaw_link"/>
+        <geom class="collision" mesh="right_wrist_yaw_link"/>
+        <geom pos="0.0415 -0.003 0" quat="1 0 0 0" class="visual" mesh="right_hand_palm_link"/>
+        <geom pos="0.0415 -0.003 0" quat="1 0 0 0" class="collision" mesh="right_hand_palm_link"/>
+
+        <!-- Palm site for reference position -->
+        <site name="palm_site" pos="0.09 -0.003 0" size="0.005" rgba="0 1 0 0.3"/>
+
+        <!-- Thumb: 3 joints -->
+        <body name="right_hand_thumb_0_link" pos="0.067 -0.003 0">
+          <inertial pos="-0.000884246 0.00863407 0.000944293"
+            quat="0.643965 0.462991 -0.398986 0.460173" mass="0.0862366"
+            diaginertia="1.6546e-05 1.60058e-05 1.43741e-05"/>
+          <joint name="thumb_0" axis="0 1 0" range="-1.0472 1.0472"/>
+          <geom class="visual" mesh="right_hand_thumb_0_link"/>
+          <geom class="collision" mesh="right_hand_thumb_0_link"/>
+          <body name="right_hand_thumb_1_link" pos="-0.0025 0.0193 0">
+            <inertial pos="-0.000827888 0.0354744 -0.0003809"
+              quat="0.705471 0.685598 -0.0956069 0.15207" mass="0.0588507"
+              diaginertia="1.28514e-05 1.22902e-05 5.9666e-06"/>
+            <joint name="thumb_1" axis="0 0 1" range="-1.0472 0.724312"/>
+            <geom class="visual" mesh="right_hand_thumb_1_link"/>
+            <geom size="0.01 0.015 0.01" pos="-0.001 0.032 0" type="box" class="collision"/>
+            <body name="right_hand_thumb_2_link" pos="0 0.0458 0">
+              <inertial pos="-0.00171735 0.0262819 0.000107789"
+                quat="0.710977 0.703174 0.00766553 0.00017564" mass="0.0203063"
+                diaginertia="4.61314e-06 3.86645e-06 1.53495e-06"/>
+              <joint name="thumb_2" axis="0 0 1" range="-1.74533 0"/>
+              <geom class="visual" mesh="right_hand_thumb_2_link"/>
+              <geom class="collision" mesh="right_hand_thumb_2_link"/>
+              <!-- Fingertip contact pad -->
+              <geom name="thumb_tip_col" type="sphere" size="0.010" pos="-0.002 0.035 0"
+                    material="hand_dark_col" friction="0.8 0.005 0.0001" condim="4"
+                    contype="1" conaffinity="1"/>
+              <site name="thumb_tip_site" pos="-0.002 0.035 0" size="0.005" rgba="1 0 0 0.5"/>
+            </body>
+          </body>
+        </body>
+
+        <!-- Middle finger: 2 joints -->
+        <body name="right_hand_middle_0_link" pos="0.1192 -0.0046 -0.0285">
+          <inertial pos="0.0354744 -0.000827888 0.0003809" quat="0.606373 0.417187 0.552395 0.391313"
+            mass="0.0588507" diaginertia="1.28514e-05 1.22902e-05 5.9666e-06"/>
+          <joint name="middle_0" axis="0 0 1" range="0 1.5708"/>
+          <geom class="visual" mesh="right_hand_middle_0_link"/>
+          <geom class="collision" mesh="right_hand_middle_0_link"/>
+          <body name="right_hand_middle_1_link" pos="0.0458 0 0">
+            <inertial pos="0.0262819 -0.00171735 -0.000107789"
+              quat="0.502861 0.502639 0.491799 0.502612" mass="0.0203063"
+              diaginertia="4.61314e-06 3.86645e-06 1.53495e-06"/>
+            <joint name="middle_1" axis="0 0 1" range="0 1.74533"/>
+            <geom class="visual" mesh="right_hand_middle_1_link"/>
+            <geom class="collision" mesh="right_hand_middle_1_link"/>
+            <!-- Fingertip contact pad -->
+            <geom name="middle_tip_col" type="sphere" size="0.010" pos="0.035 -0.002 0"
+                  material="hand_dark_col" friction="0.8 0.005 0.0001" condim="4"
+                  contype="1" conaffinity="1"/>
+            <site name="middle_tip_site" pos="0.035 -0.002 0" size="0.005" rgba="1 0 0 0.5"/>
+          </body>
+        </body>
+
+        <!-- Index finger: 2 joints -->
+        <body name="right_hand_index_0_link" pos="0.1192 -0.0046 0.0285">
+          <inertial pos="0.0354744 -0.000827888 0.0003809" quat="0.606373 0.417187 0.552395 0.391313"
+            mass="0.0588507" diaginertia="1.28514e-05 1.22902e-05 5.9666e-06"/>
+          <joint name="index_0" axis="0 0 1" range="0 1.5708"/>
+          <geom class="visual" mesh="right_hand_index_0_link"/>
+          <geom class="collision" mesh="right_hand_index_0_link"/>
+          <body name="right_hand_index_1_link" pos="0.0458 0 0">
+            <inertial pos="0.0262819 -0.00171735 -0.000107789"
+              quat="0.502861 0.502639 0.491799 0.502612" mass="0.0203063"
+              diaginertia="4.61314e-06 3.86645e-06 1.53495e-06"/>
+            <joint name="index_1" axis="0 0 1" range="0 1.74533"/>
+            <geom class="visual" mesh="right_hand_index_1_link"/>
+            <geom class="collision" mesh="right_hand_index_1_link"/>
+            <!-- Fingertip contact pad -->
+            <geom name="index_tip_col" type="sphere" size="0.010" pos="0.035 -0.002 0"
+                  material="hand_dark_col" friction="0.8 0.005 0.0001" condim="4"
+                  contype="1" conaffinity="1"/>
+            <site name="index_tip_site" pos="0.035 -0.002 0" size="0.005" rgba="1 0 0 0.5"/>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- Dice with UV-mapped dot textures -->
+    <body name="cube" pos="0.09 0.0 0.237">
+      <freejoint name="cube_joint"/>
+      <inertial pos="0 0 0" mass="0.05" diaginertia="0.0000033 0.0000033 0.0000033"/>
+      <!-- Visual mesh with dice texture -->
+      <geom name="dice_visual" type="mesh" mesh="dice_mesh" material="dice_mat"
+            contype="0" conaffinity="0" density="0" group="2"/>
+      <!-- Collision box -->
+      <geom name="cube_core" type="box" size="0.02 0.02 0.02"
+            mass="0.05" friction="0.8 0.005 0.0001" condim="4"
+            contype="1" conaffinity="1" group="3" rgba="1 1 1 0"/>
+      <site name="cube_center" pos="0 0 0" size="0.003" rgba="0 0 1 0.5"/>
+    </body>
+
+    <!-- Fixed overhead camera -->
+    <camera name="top_cam" pos="0.09 0.0 0.5" euler="0 0 0" fovy="45"/>
+    <!-- Side camera -->
+    <camera name="side_cam" pos="0.35 -0.2 0.35" xyaxes="-0.5 1 0 -0.3 -0.15 1"/>
+  </worldbody>
+
+  <!-- POSITION ACTUATORS: Unitree-style PD servo (low kp for compliant manipulation) -->
+  <!-- kp=5: soft enough for rotation, stiff enough to hold. dampratio=1: critically damped -->
+  <!-- forcelimited=true + forcerange: caps max torque like real servo limits -->
+  <actuator>
+    <position name="thumb_0_act" joint="thumb_0" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
+    <position name="thumb_1_act" joint="thumb_1" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
+    <position name="thumb_2_act" joint="thumb_2" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
+    <position name="middle_0_act" joint="middle_0" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
+    <position name="middle_1_act" joint="middle_1" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
+    <position name="index_0_act" joint="index_0" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
+    <position name="index_1_act" joint="index_1" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
+  </actuator>
+
+  <!-- Sensors -->
+  <sensor>
+    <jointpos name="thumb_0_sensor" joint="thumb_0"/>
+    <jointpos name="thumb_1_sensor" joint="thumb_1"/>
+    <jointpos name="thumb_2_sensor" joint="thumb_2"/>
+    <jointpos name="middle_0_sensor" joint="middle_0"/>
+    <jointpos name="middle_1_sensor" joint="middle_1"/>
+    <jointpos name="index_0_sensor" joint="index_0"/>
+    <jointpos name="index_1_sensor" joint="index_1"/>
+  </sensor>
+</mujoco>

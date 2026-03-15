@@ -1,0 +1,179 @@
+# CPU-only training from scratch — finger gaiting approach
+# Optimized for RunPod 16 vCPU pod (AMD EPYC 7702P)
+# No MJX dependency — trains directly on CPU MuJoCo
+env:
+  xml_path: "models/dex3_dice_scene_torque.xml"
+  max_episode_steps: 50
+  frameskip: 10
+  action_scale: 0.3
+  use_proxy_contacts: true
+
+obs_dim: 48
+act_dim: 7
+
+ppo:
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_eps: 0.2
+  value_coef: 1.0
+  entropy_coef: 0.0
+  lr: 3.0e-4
+  lr_end: 1.0e-5
+  max_grad_norm: 0.5
+  n_epochs: 4
+  minibatch_size: 256
+  rollout_steps: 64
+  total_updates: 10000
+
+network:
+  hidden_dims: [512, 256, 128]
+  activation: "tanh"
+  log_std_init: -2.0
+
+reward:
+  distance_scale: 1.0
+  progress_scale: 15.0
+  goal_bonus: 100.0
+  goal_threshold: 0.25
+  drop_penalty: -50.0
+  drop_height: 0.03
+  gait_lift_bonus: 0.0
+  gait_replace_bonus: 0.0
+  gait_force_threshold: 0.3
+  hold_bonus: 0.05
+  action_smooth_coef: 0.02
+  contact_bonus: 0.1
+  contact_penalty_1: -0.1
+
+training:
+  seed: 42
+  checkpoint_interval: 500
+  log_interval: 10
+  eval_interval: 20
+  device: "cpu"
+  normalize_obs: true
+  n_envs: 16
+
+curriculum:
+  phases:
+    # Phase 1: Hold the cube stably
+    - name: "GRIP"
+      max_angle: 0.0
+      faces: [1]
+      advance_threshold: 0.95
+      min_episodes: 300
+      min_updates_override: 25
+      log_std_bounds: [-4.0, -2.5]
+      entropy_coef: 0.0
+      max_episode_steps: 50
+      action_scale: 0.15
+      reward_overrides:
+        gait_lift_bonus: 0.0
+        gait_replace_bonus: 0.0
+        progress_scale: 0.0
+        action_smooth_coef: 0.05
+        hold_bonus: 0.1
+
+    # Phase 2: Small rotations, all fingers in contact
+    - name: "MICRO_ROTATE"
+      max_angle: 0.3
+      faces: [1]
+      advance_threshold: 0.70
+      min_episodes: 500
+      min_updates_override: 30
+      log_std_bounds: [-3.5, -1.5]
+      entropy_coef: 0.001
+      max_episode_steps: 75
+      action_scale: 0.2
+      reward_overrides:
+        gait_lift_bonus: 0.0
+        gait_replace_bonus: 0.0
+        progress_scale: 15.0
+        action_smooth_coef: 0.03
+
+    # Phase 3: Larger rotations — finger gaiting bonus kicks in
+    - name: "GAIT_EMERGE"
+      max_angle: 0.8
+      faces: [1]
+      advance_threshold: 0.45
+      min_episodes: 1000
+      min_updates_override: 50
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+      reward_overrides:
+        gait_lift_bonus: 0.5
+        gait_replace_bonus: 0.3
+        progress_scale: 10.0
+        action_smooth_coef: 0.02
+
+    # Phase 4: Medium rotations (~90 degrees) — bridge gap
+    - name: "MED_ROTATE"
+      max_angle: 1.57
+      faces: [1]
+      advance_threshold: 0.40
+      min_episodes: 1500
+      min_updates_override: 100
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+      reward_overrides:
+        gait_lift_bonus: 0.4
+        gait_replace_bonus: 0.25
+        progress_scale: 12.0
+        action_smooth_coef: 0.02
+
+    # Phase 5: Full rotation, single start face
+    - name: "SINGLE_FULL"
+      max_angle: 3.15
+      start_faces: [2]
+      faces: [1]
+      advance_threshold: 0.35
+      min_episodes: 1500
+      min_updates_override: 150
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+      reward_overrides:
+        gait_lift_bonus: 0.3
+        gait_replace_bonus: 0.2
+        progress_scale: 15.0
+        action_smooth_coef: 0.02
+
+    # Phase 6: Multi-axis full rotations
+    - name: "MULTI_FULL"
+      max_angle: 3.15
+      start_faces: [2, 3, 4, 5]
+      faces: [1]
+      advance_threshold: 0.30
+      min_episodes: 2000
+      min_updates_override: 200
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 100
+      action_scale: 0.3
+      reward_overrides:
+        gait_lift_bonus: 0.2
+        gait_replace_bonus: 0.1
+        progress_scale: 15.0
+        action_smooth_coef: 0.01
+
+    # Phase 7: All faces — any face to any face
+    - name: "ALL_FACES"
+      max_angle: 3.15
+      start_faces: [1, 2, 3, 4, 5, 6]
+      faces: [1, 2, 3, 4, 5, 6]
+      advance_threshold: 0.80
+      min_episodes: 3000
+      log_std_bounds: [-3.5, -1.2]
+      entropy_coef: 0.0
+      max_episode_steps: 100
+      action_scale: 0.3
+      reward_overrides:
+        gait_lift_bonus: 0.1
+        gait_replace_bonus: 0.1
+        progress_scale: 15.0
+        action_smooth_coef: 0.01
