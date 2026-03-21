@@ -54,12 +54,13 @@ class PPO:
         self.gamma = ppo_cfg.get("gamma", 0.99)
         self.gae_lambda = ppo_cfg.get("gae_lambda", 0.95)
         self.clip_eps = ppo_cfg.get("clip_eps", 0.2)
-        self.value_coef = ppo_cfg.get("value_coef", 1.0)
+        self.value_coef = ppo_cfg.get("value_coef", 2.0)
         self.entropy_coef = ppo_cfg.get("entropy_coef", 0.0)
         self.max_grad_norm = ppo_cfg.get("max_grad_norm", 0.5)
         self.n_epochs = ppo_cfg.get("n_epochs", 4)
         self.minibatch_size = ppo_cfg.get("minibatch_size", 512)
         self.rollout_steps = ppo_cfg.get("rollout_steps", 64)
+        self.target_kl = ppo_cfg.get("target_kl", 0.01)
 
         # Build network
         hidden_dims = net_cfg.get("hidden_dims", [256, 256])
@@ -77,6 +78,10 @@ class PPO:
         # Observation normalization
         self.obs_rms = RunningMeanStd(obs_dim)
         self.normalize_obs = config.get("training", {}).get("normalize_obs", True)
+
+        # Reward normalization (divide by running std to stabilize value targets)
+        self.reward_rms = RunningMeanStd(1)
+        self.normalize_reward = config.get("training", {}).get("normalize_reward", True)
 
         # Buffer is created externally by train_parallel.py (needs n_envs)
         self.buffer = None
@@ -123,6 +128,8 @@ class PPO:
                 actions = batch["actions"]
                 old_log_probs = batch["old_log_probs"]
                 advantages = batch["advantages"]
+                # Per-minibatch advantage normalization (standard PPO)
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
                 returns = batch["returns"]
                 old_values = batch["old_values"]
 
@@ -183,6 +190,12 @@ class PPO:
                 total_approx_kl += approx_kl
                 n_updates += 1
 
+            # KL early stopping: stop if policy diverges too much
+            if self.target_kl is not None and n_updates > 0:
+                avg_kl = total_approx_kl / n_updates
+                if avg_kl > 1.5 * self.target_kl:
+                    break
+
         self.buffer.reset()
 
         return {
@@ -201,6 +214,9 @@ class PPO:
             "obs_rms_mean": self.obs_rms.mean,
             "obs_rms_var": self.obs_rms.var,
             "obs_rms_count": self.obs_rms.count,
+            "reward_rms_mean": self.reward_rms.mean,
+            "reward_rms_var": self.reward_rms.var,
+            "reward_rms_count": self.reward_rms.count,
         }, path)
 
     def load(self, path):
@@ -212,3 +228,7 @@ class PPO:
             self.obs_rms.mean = checkpoint["obs_rms_mean"]
             self.obs_rms.var = checkpoint["obs_rms_var"]
             self.obs_rms.count = checkpoint["obs_rms_count"]
+        if "reward_rms_mean" in checkpoint:
+            self.reward_rms.mean = checkpoint["reward_rms_mean"]
+            self.reward_rms.var = checkpoint["reward_rms_var"]
+            self.reward_rms.count = checkpoint["reward_rms_count"]

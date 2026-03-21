@@ -18,7 +18,7 @@ This project implements a complete RL pipeline for dexterous in-hand manipulatio
 - **Hand Model**: Unitree Dex3-1 right hand extracted from [mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie), with 3 fingers (thumb, middle, index) and 7 actuated joints
 - **Task**: Reorient a standard dice (opposite faces sum to 7) to show a user-specified face on top
 - **Algorithm**: Custom PPO implementation in PyTorch with multi-phase curriculum learning
-- **Simulation**: MuJoCo (CPU) and MJX (GPU-accelerated) physics backends
+- **Simulation**: MuJoCo (CPU) with 256 parallel environments
 - **Control**: Native position actuators with residual action space (action = 0 holds the grip)
 
 ### The Hand
@@ -52,51 +52,42 @@ This project implements a complete RL pipeline for dexterous in-hand manipulatio
 
 ```
 Dex_Uni/
-├── configs/                    # Training configurations (YAML)
-│   ├── ppo_mjx_gait.yaml      # MJX GPU training + domain randomization
-│   ├── ppo_cpu_gait.yaml       # CPU training with finger gaiting
-│   ├── ppo_cpu_finetune.yaml   # CPU fine-tune from MJX checkpoint
-│   ├── ppo_mjx_config.yaml     # Base MJX config (11-phase curriculum)
-│   ├── ppo_parallel_config.yaml# Base CPU parallel config
-│   └── ppo_cpu_config.yaml     # Single-target CPU config
+├── configs/                        # Training configurations (YAML)
+│   └── ppo_v2_runpod.yaml         # Current config: 9-phase curriculum, 256 envs
 │
-├── envs/                       # Environment implementations
-│   ├── dex_cube_env.py         # Single-env MuJoCo environment (obs_dim=48, act_dim=7)
-│   ├── mjx_vec_env.py          # GPU-vectorized env using MJX (2048 parallel envs)
-│   ├── vec_env.py              # CPU SubprocVecEnv (multiprocessing)
-│   └── reward.py               # Reward functions (distance + progress + gait)
+├── envs/                           # Environment implementations
+│   ├── dex_cube_env.py             # Single-env MuJoCo environment (obs_dim=48, act_dim=7)
+│   ├── vec_env.py                  # CPU SubprocVecEnv (multiprocessing, auto-reset)
+│   └── reward.py                   # Reward: distance + progress + gait + contact + smooth
 │
-├── rl/                         # Reinforcement learning components
-│   ├── ppo.py                  # PPO with value clipping, obs normalization
-│   ├── actor_critic.py         # Actor-Critic network (512-256-128, tanh)
-│   └── buffer.py               # Rollout buffer with per-env GAE
+├── rl/                             # Reinforcement learning components
+│   ├── ppo.py                      # PPO with value clipping, obs/reward normalization
+│   ├── actor_critic.py             # Actor-Critic network (512-256-128, tanh)
+│   └── buffer.py                   # Rollout buffer with per-env GAE
 │
-├── training/                   # Training scripts
-│   ├── train_mjx.py            # Hybrid GPU physics + CPU reward training
-│   ├── train_parallel.py       # CPU parallel training with curriculum
-│   └── evaluate.py             # Per-face evaluation + video recording
+├── training/                       # Training scripts
+│   ├── train_parallel.py           # CPU parallel training with 9-phase curriculum
+│   └── evaluate.py                 # Per-face evaluation + video recording
 │
-├── perception/                 # Dice state detection
-│   └── face_detector.py        # Geometric face detection + target quaternions
+├── perception/                     # Dice state detection
+│   └── face_detector.py            # Geometric face detection + target quaternions
 │
-├── ui/                         # Visualization
-│   ├── viewer.py               # Interactive MuJoCo viewer (press 1-6 for faces)
-│   └── viewer_cpu.py           # CPU-only viewer
+├── ui/                             # Visualization
+│   ├── viewer.py                   # Interactive MuJoCo viewer (press 1-6 for faces)
+│   └── viewer_cpu.py               # CPU-only viewer
 │
-├── models/                     # MuJoCo XML models
-│   ├── dex3_dice_scene_torque.xml  # CPU model (mesh collisions, position actuators)
-│   ├── dex3_dice_scene_mjx.xml    # MJX model (primitive collisions for GPU)
-│   ├── dex3_dice_scene.xml        # Base scene
-│   └── dex3_assets/               # STL meshes + dice OBJ
+├── models/                         # MuJoCo XML models
+│   ├── dex3_dice_scene_torque.xml  # Position actuators, mesh collisions, kp=50
+│   └── dex3_assets/                # STL meshes + dice OBJ + texture
 │
-├── scripts/                    # Utility scripts
-│   ├── test_env.py             # Environment integration test
-│   ├── test_reward.py          # Reward function unit tests
-│   ├── generate_textures.py    # Dice texture generator
-│   └── decimate_meshes.py      # Mesh simplification
+├── scripts/                        # Utility & verification scripts
+│   ├── smoke_test_training.py      # Pipeline smoke test (all 9 phases)
+│   ├── test_manipulation.py        # Physics pipeline verification
+│   ├── diagnose_hand.py            # Hand diagnostics
+│   └── sweep_grip.py               # Grip parameter sweep
 │
-└── assets/                     # Images and resources
-    └── *.png                   # Screenshots for documentation
+└── assets/                         # Images and resources
+    └── *.png                       # Screenshots for documentation
 ```
 
 ---
@@ -127,8 +118,8 @@ ctrl = grip_qpos + action * action_scale
 ```
 
 - `action = 0` holds the dice at the default grip position
-- `action_scale = 0.3 rad` (reduced in early curriculum phases)
-- Native MuJoCo position actuators (`kp=5, dampratio=1, forcerange=[-1.5, 1.5]`)
+- `action_scale = 0.25 rad` (reduced in early curriculum phases: 0.08 → 0.15 → 0.25)
+- Native MuJoCo position actuators (`kp=50, dampratio=1`), per-joint forcerange: thumb_0 ±2.45 Nm, all others ±1.4 Nm
 
 ### Reward Design
 
@@ -148,21 +139,27 @@ The reward function combines continuous shaping with sparse task completion sign
 
 **Finger gaiting**: Bioinspired approach where 2 fingers hold the object while 1 lifts, repositions, and re-engages. A cooldown timer (5 steps) prevents reward hacking through rapid cycling.
 
-### Curriculum Learning (7 Phases)
+### Curriculum Learning (9 Phases)
 
-Training progresses through graduated difficulty levels:
+Training progresses through graduated difficulty levels. Each phase controls its own exploration noise (log_std bounds), entropy bonus, episode length, action scale, and reward weights. Phases advance only when **eval success rate** (not training SR) exceeds the threshold, with minimum update counts to prevent premature advancement.
 
-| Phase | Task | Max Angle | Advance SR |
-|-------|------|-----------|------------|
-| 1. GRIP | Hold cube stable | 0.0 rad | 95% |
-| 2. MICRO_ROTATE | Tiny rotations | 0.3 rad (~17 deg) | 70% |
-| 3. GAIT_EMERGE | Medium rotations, gaiting bonus | 0.8 rad (~46 deg) | 45% |
-| 4. MED_ROTATE | ~90 degree rotations | 1.57 rad (~90 deg) | 40% |
-| 5. SINGLE_FULL | Full rotation, one start face | 3.15 rad | 35% |
-| 6. MULTI_FULL | Full rotation, multiple starts | 3.15 rad | 30% |
-| 7. ALL_FACES | Any face to any face | 3.15 rad | 80% |
+| Phase | Task | Start → Target | Advance SR |
+|-------|------|----------------|------------|
+| 1. GRIP | Hold cube stable | angle(0.0) → [1] | 95% |
+| 2. MICRO_ROTATE | Tiny rotations (~17 deg) | angle(0.3) → [1] | 70% |
+| 3. GAIT_EMERGE | Medium rotations, gaiting begins | angle(0.8) → [1] | 45% |
+| 4. MED_ROT | Half rotations (~90 deg) | angle(1.57) → [1] | 35% |
+| 5. SINGLE_90 | Full rotation, one start face | [2] → [1] | 30% |
+| 6. MULTI_90 | Full rotation, all start faces | [2,3,4,5,6] → [1] | 40% |
+| 7. MULTI_TARGET | Introduce non-face-1 targets | [1-6] → [1,2,6] | 30% |
+| 8. EXPAND_TARGET | All 36 transitions (warm-up) | [1-6] → [1-6] | 25% |
+| 9. ALL_FACES | Any face to any face (terminal) | [1-6] → [1-6] | 80% |
 
-Per-phase control of: learning rate, exploration noise (log_std bounds), entropy bonus, episode length, action scale, and reward weights.
+Key design decisions:
+- **Phases 1-6** only target face 1, building rotation skills incrementally
+- **Phase 7** introduces 2 new target faces (face 2 and face 6) for the first time — 18 transitions
+- **Phase 8** expands to all 36 transitions at a low threshold, warming up the policy before the terminal phase
+- **Phase 9** is the terminal phase requiring 80% SR across all faces with 1500 minimum updates
 
 ### Dice Face Mapping
 
@@ -181,40 +178,32 @@ Face 3: +X (right)    Face 4: -X (left)
 
 ## Training
 
-### MJX GPU Training (Recommended)
+### CPU Parallel Training (Current)
 
-Trains on 2048 parallel environments using GPU-accelerated MuJoCo XLA physics with domain randomization:
-
-```bash
-python training/train_mjx.py --config configs/ppo_mjx_gait.yaml
-```
-
-- **Hardware**: RTX 4090, ~18s/update, ~20 hours for 4000 updates
-- **Data**: 131K transitions per update (2048 envs x 64 steps)
-- **Domain Randomization**: Friction, mass, damping, stiffness, observation noise
-- **Result**: 100% eval success rate on all 6 faces in MJX physics
-
-### CPU Parallel Training
-
-Trains on CPU MuJoCo with SubprocVecEnv (16-64 parallel environments):
+Trains on CPU MuJoCo with SubprocVecEnv and 256 parallel environments:
 
 ```bash
-python training/train_parallel.py --config configs/ppo_cpu_gait.yaml
+python training/train_parallel.py --config configs/ppo_v2_runpod.yaml
 ```
 
-### CPU Fine-Tuning (from MJX checkpoint)
-
-Adapts an MJX-trained policy to CPU MuJoCo physics:
-
-```bash
-python training/train_parallel.py --config configs/ppo_cpu_finetune.yaml --resume checkpoints/final_model.pt
-```
+- **Hardware**: RunPod cloud GPU instance (CPU training, GPU optional for PyTorch)
+- **Data**: 16,384 transitions per update (256 envs x 64 rollout steps)
+- **Curriculum**: 9-phase progression from grip stability to all-face reorientation
+- **PPO**: Per-minibatch advantage normalization, reward normalization, KL early stopping
 
 ### Resume Training
 
 ```bash
-python training/train_mjx.py --config configs/ppo_mjx_gait.yaml --resume checkpoints/ppo_update_1000.pt --start_phase 3
+python training/train_parallel.py --config configs/ppo_v2_runpod.yaml --resume checkpoints/ppo_update_1000.pt --start_phase 3
 ```
+
+### Smoke Test (verify pipeline)
+
+```bash
+python scripts/smoke_test_training.py --config configs/ppo_v2_runpod.yaml
+```
+
+Runs 8 envs with 3 updates per phase — verifies all 9 phases work without crashes, NaN, or invalid rewards.
 
 ---
 
@@ -223,13 +212,7 @@ python training/train_mjx.py --config configs/ppo_mjx_gait.yaml --resume checkpo
 Run per-face evaluation on CPU MuJoCo:
 
 ```bash
-python training/evaluate.py --checkpoint checkpoints/final_model.pt --config configs/ppo_mjx_gait.yaml --episodes 100
-```
-
-Record videos:
-
-```bash
-python training/evaluate.py --checkpoint checkpoints/final_model.pt --record
+python training/evaluate.py --checkpoint checkpoints/best_eval_model.pt --config configs/ppo_v2_runpod.yaml
 ```
 
 Output:
@@ -249,7 +232,7 @@ Output:
 Launch the MuJoCo viewer with a trained policy:
 
 ```bash
-python ui/viewer.py --checkpoint checkpoints/final_model.pt
+python ui/viewer_cpu.py --checkpoint checkpoints/best_eval_model.pt --config configs/ppo_v2_runpod.yaml
 ```
 
 **Controls**:
@@ -266,7 +249,9 @@ MuJoCo's native position actuators handle PD control internally, providing stabl
 
 ```xml
 <actuator>
-  <position name="thumb_0_act" joint="thumb_0" kp="5" dampratio="1" forcerange="-1.5 1.5"/>
+  <position name="thumb_0_act" joint="thumb_0" kp="50" dampratio="1" forcerange="-2.45 2.45"/>
+  <position name="thumb_1_act" joint="thumb_1" kp="50" dampratio="1" forcerange="-1.4 1.4"/>
+  <!-- ... per-joint forcerange from Unitree menagerie specs -->
 </actuator>
 ```
 
@@ -284,30 +269,60 @@ def quat_distance(q1, q2):
 Pre-tuned joint positions that form a stable three-finger cradle:
 
 ```python
-grip_qpos = [-0.419, -0.339, -1.047, 1.100, 1.222, 1.100, 1.222]
+grip_qpos = [-0.5, -0.4, -1.2, 0.85, 0.8, 0.85, 0.8]
 ```
 
-Reset uses a 2-phase sequence: 300-step interpolation to grip + 100-step settle.
+Reset uses a 3-phase sequence: 300-step close (kinematic hold) + 100-step gradual release (ramp down support force) + 300-step settle (free dynamics).
 
 ---
 
 ## Results
 
-### MJX Training (GPU, 2048 envs, domain randomization)
+### v1: MJX Training (GPU, 2048 envs)
 
 - All 7 curriculum phases completed
 - **100% eval success rate** on all 6 target faces in MJX physics
-- 524M timesteps, ~20 hours on RTX 4090
+- 262M timesteps, ~8.3 hours on RTX 4090
 - 0% drop rate throughout training
+- **However**: MJX→CPU transfer gap of ~76% (100% MJX → 24% CPU) due to collision geometry mismatch (primitives vs meshes). MJX approach abandoned.
 
-### Sim-to-Sim Transfer Gap
+### v2: CPU Training (256 envs) — In Progress
 
-The MJX-trained policy achieves ~24% success rate when transferred to CPU MuJoCo without fine-tuning. This gap is primarily due to differences in collision geometry (MJX uses primitive shapes, CPU uses mesh collisions), not physics parameters. Domain randomization on friction/mass/damping did not significantly close this gap.
+The v2 pipeline trains directly on CPU MuJoCo with mesh collisions, avoiding the sim-to-sim transfer gap entirely:
 
-**Possible solutions** (not yet implemented):
-- CPU fine-tuning from MJX checkpoint (lower learning rate, same task)
-- Unified collision geometry between MJX and CPU models
-- Asymmetric domain randomization targeting collision response
+- **9-phase curriculum** with gradual introduction of target faces
+- **256 parallel envs** providing 16,384 transitions per update
+- **PPO fixes**: per-minibatch advantage normalization, reward normalization, KL early stopping
+- **Reward audit**: drop_penalty calibrated to prevent perverse drop incentives
+- **Smoke test**: all 9 phases verified — no NaN, valid rewards, finite losses
+- **Status**: pipeline ready, clean-slate retrain pending on RunPod
+
+### v1 CPU Training Peak (reference)
+
+- Peak eval SR: 94.1% (update ~8000), final: 80.9% at update 15000
+- F3 oscillation due to catastrophic interference in multi-task RL
+- Motivated the v2 pipeline overhaul with 9-phase curriculum
+
+---
+
+## Current Status — To Be Continued
+
+The v2 pipeline is fully audited and verified. The immediate next step is a **clean-slate retrain** on RunPod with the 9-phase curriculum:
+
+```bash
+python training/train_parallel.py --config configs/ppo_v2_runpod.yaml
+```
+
+**What's ready:**
+- 9-phase curriculum with smooth target face introduction
+- 256 parallel CPU environments (16K transitions/update)
+- PPO with per-minibatch advantage normalization, reward normalization, KL early stopping
+- Calibrated actuators matching Unitree menagerie specs (kp=50, per-joint forcerange)
+- Calibrated dice physics (correct inertia, torsional friction)
+- Drop penalty tuned to prevent perverse incentives in later phases
+- Smoke test passing all 9 phases
+
+**Target:** 80%+ eval success rate across all 6 faces on CPU MuJoCo with mesh collisions.
 
 ---
 
@@ -330,7 +345,7 @@ Replace the unimodal Gaussian policy with a **diffusion-based policy** that gene
 
 - **No demonstrations needed**: The current pipeline is fully self-play RL - there are no human demonstrations for this specific hand morphology. DPPO can fine-tune a diffusion policy entirely from reward, matching the existing training paradigm.
 - **Sim-to-sim transfer**: A diffusion policy's richer action distribution may generalize better across physics backends (MJX vs. CPU MuJoCo), potentially closing the 100% -> 24% transfer gap that domain randomization alone could not resolve.
-- **Curriculum compatibility**: DPPO can integrate with the existing 7-phase curriculum - train a diffusion policy through progressive difficulty stages, with the denoising process adapting to each phase's reward structure.
+- **Curriculum compatibility**: DPPO can integrate with the existing 9-phase curriculum - train a diffusion policy through progressive difficulty stages, with the denoising process adapting to each phase's reward structure.
 
 ### Planned Architecture
 
@@ -380,7 +395,15 @@ A policy trained to 100% SR in MJX (GPU physics) only achieved **21-24% SR** on 
 
 ### Data Diversity Bottleneck
 
-With 16 CPU envs and 36 face-to-face combinations (6 start x 6 target), each update provided only **~1.8 episodes per combination** - far too noisy for the policy to learn hard rotations (e.g., Face 5->Face 1 requires ~180 degree rotation). MJX's 2048 parallel envs solved this with **~57 episodes per combination per update**.
+With 16 CPU envs and 36 face-to-face combinations (6 start x 6 target), each update provided only **~1.8 episodes per combination** — far too noisy for the policy to learn hard rotations. Scaled to 256 CPU envs, providing ~7 episodes per combination per update.
+
+### Advantage Normalization (v2 fix)
+
+Advantages were normalized globally across the entire rollout buffer, then fed to PPO without re-normalizing per minibatch. Standard PPO practice is per-minibatch normalization — global normalization distorts the relative scale of advantages within each minibatch. Fixed by moving normalization from `buffer.py` to the PPO update loop.
+
+### Drop Penalty Incentive Bug (v2 fix)
+
+In later curriculum phases, `drop_penalty=-30` created a perverse incentive: a 150-step episode holding the cube without progress accumulated ~-53 total reward, while dropping early at step 10 gave only -34. **The policy learned that dropping was better than struggling on unfamiliar transitions.** Fixed by increasing drop_penalty to -50 in phases 7-9.
 
 ---
 
@@ -393,9 +416,6 @@ cd unitree-dex3-rl
 
 # Install dependencies
 pip install mujoco torch numpy pyyaml tensorboard tqdm
-
-# For MJX GPU training (requires CUDA)
-pip install mujoco-mjx jax[cuda12]
 ```
 
 ### Requirements
@@ -403,7 +423,6 @@ pip install mujoco-mjx jax[cuda12]
 - Python 3.10+
 - MuJoCo 3.5+
 - PyTorch 2.0+
-- JAX with CUDA (for MJX training only)
 - NumPy, PyYAML, TensorBoard, tqdm
 
 ---

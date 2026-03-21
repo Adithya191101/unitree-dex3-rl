@@ -1,6 +1,7 @@
 <mujoco model="dex3_dice_reorientation_torque">
   <compiler angle="radian" meshdir="dex3_assets/" texturedir="../assets/"/>
   <option timestep="0.002" integrator="implicitfast"/>
+  <size memory="1G"/>
 
   <statistic center="0 0 0.15" extent="0.3"/>
 
@@ -41,12 +42,12 @@
   <default>
     <default class="dex3">
       <!-- Higher damping for torque control stability -->
-      <joint armature="0.01" frictionloss="0.1" damping="0.3"/>
+      <joint armature="0.01" frictionloss="0.3" damping="0.3"/>
       <default class="visual">
         <geom group="2" type="mesh" contype="0" conaffinity="0" density="0" material="hand_dark"/>
       </default>
       <default class="collision">
-        <geom group="3" type="mesh" material="hand_dark_col" friction="0.8 0.005 0.0001" condim="4"/>
+        <geom group="3" type="mesh" material="hand_dark_col" friction="0.8 0.05 0.001" condim="3"/>
       </default>
     </default>
   </default>
@@ -96,7 +97,7 @@
               <geom class="collision" mesh="right_hand_thumb_2_link"/>
               <!-- Fingertip contact pad -->
               <geom name="thumb_tip_col" type="sphere" size="0.010" pos="-0.002 0.035 0"
-                    material="hand_dark_col" friction="0.8 0.005 0.0001" condim="4"
+                    material="hand_dark_col" friction="0.8 0.05 0.001" condim="3"
                     contype="1" conaffinity="1"/>
               <site name="thumb_tip_site" pos="-0.002 0.035 0" size="0.005" rgba="1 0 0 0.5"/>
             </body>
@@ -119,7 +120,7 @@
             <geom class="collision" mesh="right_hand_middle_1_link"/>
             <!-- Fingertip contact pad -->
             <geom name="middle_tip_col" type="sphere" size="0.010" pos="0.035 -0.002 0"
-                  material="hand_dark_col" friction="0.8 0.005 0.0001" condim="4"
+                  material="hand_dark_col" friction="0.8 0.05 0.001" condim="3"
                   contype="1" conaffinity="1"/>
             <site name="middle_tip_site" pos="0.035 -0.002 0" size="0.005" rgba="1 0 0 0.5"/>
           </body>
@@ -141,7 +142,7 @@
             <geom class="collision" mesh="right_hand_index_1_link"/>
             <!-- Fingertip contact pad -->
             <geom name="index_tip_col" type="sphere" size="0.010" pos="0.035 -0.002 0"
-                  material="hand_dark_col" friction="0.8 0.005 0.0001" condim="4"
+                  material="hand_dark_col" friction="0.8 0.05 0.001" condim="3"
                   contype="1" conaffinity="1"/>
             <site name="index_tip_site" pos="0.035 -0.002 0" size="0.005" rgba="1 0 0 0.5"/>
           </body>
@@ -152,13 +153,13 @@
     <!-- Dice with UV-mapped dot textures -->
     <body name="cube" pos="0.09 0.0 0.237">
       <freejoint name="cube_joint"/>
-      <inertial pos="0 0 0" mass="0.05" diaginertia="0.0000033 0.0000033 0.0000033"/>
+      <inertial pos="0 0 0" mass="0.05" diaginertia="0.0000133 0.0000133 0.0000133"/>
       <!-- Visual mesh with dice texture -->
       <geom name="dice_visual" type="mesh" mesh="dice_mesh" material="dice_mat"
             contype="0" conaffinity="0" density="0" group="2"/>
       <!-- Collision box -->
       <geom name="cube_core" type="box" size="0.02 0.02 0.02"
-            mass="0.05" friction="0.8 0.005 0.0001" condim="4"
+            mass="0.05" friction="0.8 0.05 0.001" condim="3"
             contype="1" conaffinity="1" group="3" rgba="1 1 1 0"/>
       <site name="cube_center" pos="0 0 0" size="0.003" rgba="0 0 1 0.5"/>
     </body>
@@ -169,17 +170,17 @@
     <camera name="side_cam" pos="0.35 -0.2 0.35" xyaxes="-0.5 1 0 -0.3 -0.15 1"/>
   </worldbody>
 
-  <!-- POSITION ACTUATORS: Unitree-style PD servo (low kp for compliant manipulation) -->
-  <!-- kp=5: soft enough for rotation, stiff enough to hold. dampratio=1: critically damped -->
-  <!-- forcelimited=true + forcerange: caps max torque like real servo limits -->
+  <!-- POSITION ACTUATORS: PD servo with menagerie-calibrated force limits -->
+  <!-- kp=50: stiff enough for tracking, RL-friendly proportional range -->
+  <!-- Per-joint forcerange from Unitree menagerie actuatorfrcrange specs -->
   <actuator>
-    <position name="thumb_0_act" joint="thumb_0" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
-    <position name="thumb_1_act" joint="thumb_1" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
-    <position name="thumb_2_act" joint="thumb_2" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
-    <position name="middle_0_act" joint="middle_0" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
-    <position name="middle_1_act" joint="middle_1" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
-    <position name="index_0_act" joint="index_0" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
-    <position name="index_1_act" joint="index_1" kp="5" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.5 1.5"/>
+    <position name="thumb_0_act"  joint="thumb_0"  kp="50" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-2.45 2.45"/>
+    <position name="thumb_1_act"  joint="thumb_1"  kp="50" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.4 1.4"/>
+    <position name="thumb_2_act"  joint="thumb_2"  kp="50" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.4 1.4"/>
+    <position name="middle_0_act" joint="middle_0" kp="50" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.4 1.4"/>
+    <position name="middle_1_act" joint="middle_1" kp="50" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.4 1.4"/>
+    <position name="index_0_act"  joint="index_0"  kp="50" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.4 1.4"/>
+    <position name="index_1_act"  joint="index_1"  kp="50" dampratio="1" inheritrange="1" forcelimited="true" forcerange="-1.4 1.4"/>
   </actuator>
 
   <!-- Sensors -->

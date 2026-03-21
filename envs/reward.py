@@ -59,7 +59,7 @@ def compute_reward(cube_quat, target_quat, cube_pos, palm_pos, action, config,
     r_drop = config.get("drop_penalty", -50.0) if dropped else 0.0
 
     # Goal achieved check
-    goal_threshold = config.get("goal_threshold", 0.25)
+    goal_threshold = config.get("goal_threshold", 0.03)
     achieved_goal = curr_dist < goal_threshold
 
     total = r_distance + r_progress + r_contact + r_drop
@@ -166,7 +166,7 @@ def compute_gait_reward(cube_quat, target_quat, cube_pos, palm_pos, action, conf
     r_drop = config.get("drop_penalty", -50.0) if dropped else 0.0
 
     # Goal check
-    goal_threshold = config.get("goal_threshold", 0.25)
+    goal_threshold = config.get("goal_threshold", 0.03)
     achieved_goal = bool(curr_dist < goal_threshold)
 
     total = r_distance + r_progress + r_contact + r_gait + r_hold + r_smooth + r_drop

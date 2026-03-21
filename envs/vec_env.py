@@ -52,6 +52,10 @@ def _worker(remote, parent_remote, env_fn):
             env.set_reward_config(data)
             remote.send(None)
 
+        elif cmd == "set_continuous_episodes":
+            env.set_continuous_episodes(bool(data))
+            remote.send(None)
+
         elif cmd == "get_attr":
             remote.send(getattr(env, data))
 
@@ -125,6 +129,13 @@ class SubprocVecEnv:
         """Update reward config in all envs with per-phase overrides."""
         for remote in self.remotes:
             remote.send(("set_reward_config", overrides))
+        for remote in self.remotes:
+            remote.recv()
+
+    def set_continuous_episodes(self, enabled):
+        """Toggle continuous episodes in all envs."""
+        for remote in self.remotes:
+            remote.send(("set_continuous_episodes", enabled))
         for remote in self.remotes:
             remote.recv()
 

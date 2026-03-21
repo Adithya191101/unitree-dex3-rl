@@ -71,11 +71,7 @@ class RolloutBuffer:
             self.advantages[t] = gae
 
         self.returns[:n] = self.advantages[:n] + self.values[:n]
-
-        # Normalize advantages across all envs and steps
-        adv = self.advantages[:n].ravel()
-        mean, std = adv.mean(), adv.std()
-        self.advantages[:n] = (self.advantages[:n] - mean) / (std + 1e-8)
+        # Advantage normalization is done per-minibatch in ppo.py update()
 
     def get_batches(self, minibatch_size, device="cpu"):
         """Flatten (steps, n_envs) -> (steps*n_envs,), shuffle, yield minibatches."""

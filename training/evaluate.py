@@ -52,7 +52,7 @@ def evaluate(agent, env, face, n_episodes=100, max_steps=100):
     }
 
 
-def record_video(agent, env, face, output_path, max_steps=50):
+def record_video(agent, env, face, output_path, max_steps=150):
     """Record a rollout as MP4."""
     try:
         import cv2
@@ -64,7 +64,7 @@ def record_video(agent, env, face, output_path, max_steps=50):
     frames = []
 
     for step in range(max_steps):
-        frame = env.render_camera("top_cam", width=512, height=512)
+        frame = env.render_camera("top_cam", width=480, height=480)
         frames.append(frame)
 
         action, _, _ = agent.select_action(obs, deterministic=True)
@@ -74,7 +74,7 @@ def record_video(agent, env, face, output_path, max_steps=50):
 
     # Write video
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_path, fourcc, 20.0, (512, 512))
+    out = cv2.VideoWriter(output_path, fourcc, 20.0, (480, 480))
     for frame in frames:
         out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
     out.release()
@@ -98,24 +98,35 @@ def main():
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
+    # Use ALL_FACES phase overrides to match training conditions
+    phases = config.get("curriculum", {}).get("phases", [])
+    final_phase = phases[-1] if phases else {}
+    reward_config = dict(config.get("reward", {}))
+    reward_overrides = final_phase.get("reward_overrides", {})
+    reward_config.update(reward_overrides)
+
+    action_scale = final_phase.get("action_scale", config["env"].get("action_scale", 0.3))
+    max_steps = final_phase.get("max_episode_steps", config["env"].get("max_episode_steps", 100))
+
     env_config = {
         "frameskip": config["env"].get("frameskip", 10),
-        "max_episode_steps": config["env"].get("max_episode_steps", 100),
-        "reward": config.get("reward", {}),
-        "action_scale": config["env"].get("action_scale", 0.3),
-        "use_proxy_contacts": config["env"].get("use_proxy_contacts", True),
+        "max_episode_steps": max_steps,
+        "reward": reward_config,
+        "action_scale": action_scale,
+        "use_proxy_contacts": config["env"].get("use_proxy_contacts", False),
     }
     env = DexCubeEnv(xml_path=xml_path, config=env_config)
     agent = PPO(env.obs_dim, env.act_dim, config=config, device="cpu")
     agent.load(args.checkpoint)
     print(f"Loaded: {args.checkpoint}")
+    print(f"action_scale={action_scale}, max_steps={max_steps}, goal_threshold={reward_config.get('goal_threshold', 0.03)}")
 
     print(f"\n{'Face':>6} {'Success%':>10} {'Mean R':>10} {'Mean Len':>10} {'Drop%':>10}")
     print("-" * 50)
 
     all_results = []
     for face in range(1, 7):
-        result = evaluate(agent, env, face, n_episodes=args.episodes)
+        result = evaluate(agent, env, face, n_episodes=args.episodes, max_steps=max_steps)
         all_results.append(result)
         print(f"{face:>6} {result['success_rate']:>10.1%} "
               f"{result['mean_reward']:>10.2f} "

@@ -1,0 +1,230 @@
+# v7: v6 + progress_scale 5→15 in ALL_FACES + n_envs 256
+env:
+  xml_path: "models/dex3_dice_scene_torque.xml"
+  max_episode_steps: 150
+  frameskip: 10
+  action_scale: 0.15
+  continuous_episodes: false
+
+obs_dim: 48
+act_dim: 7
+
+ppo:
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_eps: 0.2
+  value_coef: 2.0
+  entropy_coef: 0.0
+  lr: 3.0e-4
+  lr_end: 1.0e-5
+  max_grad_norm: 0.5
+  n_epochs: 3
+  target_kl: 0.015
+  minibatch_size: 512
+  rollout_steps: 64
+  total_updates: 15000
+
+network:
+  hidden_dims: [512, 256, 128]
+  activation: "tanh"
+  log_std_init: -1.0
+
+reward:
+  distance_scale: 1.0
+  progress_scale: 15.0                 # v7: was 5.0 — match MJX success
+  goal_bonus: 100.0
+  goal_threshold: 0.25               # v6: was 0.05 (~26°) — MJX success used 0.25 (~60°)
+  drop_penalty: -100.0
+  drop_height: 0.03
+  gait_lift_bonus: 0.0
+  gait_replace_bonus: 0.0
+  gait_force_threshold: 0.3
+  hold_bonus: 0.05
+  action_smooth_coef: 0.02
+  contact_bonus: 0.1
+  contact_penalty_1: -0.1
+
+training:
+  seed: 42
+  checkpoint_interval: 200
+  log_interval: 5
+  eval_interval: 50                    # More frequent evals for eval-gated advancement
+  device: "cuda"
+  normalize_obs: true
+  n_envs: 256                         # v7: was 192 — more data per face combo
+
+curriculum:
+  # v5 FIX: All phases have min_updates_override >= 50 (ensures eval runs before advancement)
+  # v5 FIX: Added MED_ROT phase to bridge 0.8→3.15 rad gap
+  # v5 FIX: Phase advancement requires eval SR (no training SR fallback)
+  phases:
+    # Phase 1: Hold the cube stably
+    - name: "GRIP"
+      max_angle: 0.0
+      faces: [1]
+      advance_threshold: 0.95
+      min_episodes: 500
+      min_updates_override: 50          # v5: was missing — phases raced through in <10 updates
+      log_std_bounds: [-4.0, -2.0]
+      entropy_coef: 0.0
+      max_episode_steps: 50
+      action_scale: 0.08
+      reward_overrides:
+        gait_lift_bonus: 0.0
+        gait_replace_bonus: 0.0
+        progress_scale: 0.0
+        action_smooth_coef: 0.05
+        hold_bonus: 0.1
+        drop_penalty: -100.0
+
+    # Phase 2: Small rotations (~17 deg)
+    - name: "MICRO_ROTATE"
+      max_angle: 0.3
+      faces: [1]
+      advance_threshold: 0.70
+      min_episodes: 1000
+      min_updates_override: 150         # v5: was missing — solved in 25 updates before
+      log_std_bounds: [-3.0, -0.7]
+      entropy_coef: 0.005
+      max_episode_steps: 80
+      action_scale: 0.15
+      reward_overrides:
+        gait_lift_bonus: 0.0
+        gait_replace_bonus: 0.0
+        progress_scale: 15.0
+        action_smooth_coef: 0.03
+        drop_penalty: -80.0
+
+    # Phase 3: Medium rotations (~46 deg) -- gaiting begins
+    - name: "GAIT_EMERGE"
+      max_angle: 0.8
+      faces: [1]
+      advance_threshold: 0.45
+      min_episodes: 2000
+      min_updates_override: 300         # v5: was missing — solved in 50 updates before
+      log_std_bounds: [-2.5, -0.5]
+      entropy_coef: 0.01
+      max_episode_steps: 100
+      action_scale: 0.25
+      reward_overrides:
+        gait_lift_bonus: 0.5
+        gait_replace_bonus: 0.3
+        progress_scale: 15.0
+        action_smooth_coef: 0.02
+        drop_penalty: -60.0
+
+    # Phase 4: Half rotation (~90 deg) -- NEW intermediate phase
+    - name: "MED_ROT"
+      max_angle: 1.57
+      faces: [1]
+      advance_threshold: 0.35
+      min_episodes: 2000
+      min_updates_override: 500         # v5: NEW phase bridging 0.8→3.15 gap
+      log_std_bounds: [-2.5, -0.5]
+      entropy_coef: 0.008
+      max_episode_steps: 120
+      action_scale: 0.25
+      reward_overrides:
+        gait_lift_bonus: 0.4
+        gait_replace_bonus: 0.2
+        progress_scale: 15.0
+        action_smooth_coef: 0.02
+        drop_penalty: -50.0
+
+    # Phase 5: Full rotation, single start face (face 2→1)
+    - name: "SINGLE_90"
+      max_angle: 3.15
+      start_faces: [2]
+      faces: [1]
+      advance_threshold: 0.30
+      min_episodes: 2000
+      min_updates_override: 600         # v5: was 200 — too short
+      log_std_bounds: [-2.5, -0.5]
+      entropy_coef: 0.005
+      max_episode_steps: 150
+      action_scale: 0.25
+      reward_overrides:
+        gait_lift_bonus: 0.3
+        gait_replace_bonus: 0.2
+        progress_scale: 15.0
+        action_smooth_coef: 0.01
+        drop_penalty: -50.0
+
+    # Phase 6: Full rotation, multiple start faces → face 1
+    - name: "MULTI_90"
+      max_angle: 3.15
+      start_faces: [2, 3, 4, 5, 6]
+      faces: [1]
+      advance_threshold: 0.40
+      min_episodes: 3000
+      min_updates_override: 800         # v5: was 300 — too short
+      log_std_bounds: [-2.5, -0.5]
+      entropy_coef: 0.003
+      max_episode_steps: 150
+      action_scale: 0.25
+      reward_overrides:
+        gait_lift_bonus: 0.2
+        gait_replace_bonus: 0.1
+        progress_scale: 15.0
+        action_smooth_coef: 0.01
+        drop_penalty: -40.0
+
+    # Phase 7: Multiple target faces — introduce non-face-1 targets
+    - name: "MULTI_TARGET"
+      max_angle: 3.15
+      start_faces: [1, 2, 3, 4, 5, 6]
+      faces: [1, 2, 6]
+      advance_threshold: 0.30
+      min_episodes: 3000
+      min_updates_override: 800
+      log_std_bounds: [-2.5, -0.5]
+      entropy_coef: 0.005
+      max_episode_steps: 150
+      action_scale: 0.25
+      reward_overrides:
+        gait_lift_bonus: 0.2
+        gait_replace_bonus: 0.1
+        progress_scale: 15.0
+        action_smooth_coef: 0.01
+        drop_penalty: -50.0
+
+    # Phase 8: All 36 transitions — warm-up for ALL_FACES
+    - name: "EXPAND_TARGET"
+      max_angle: 3.15
+      start_faces: [1, 2, 3, 4, 5, 6]
+      faces: [1, 2, 3, 4, 5, 6]
+      advance_threshold: 0.25
+      min_episodes: 4000
+      min_updates_override: 1000
+      log_std_bounds: [-2.5, -0.5]
+      entropy_coef: 0.003
+      max_episode_steps: 150
+      action_scale: 0.25
+      reward_overrides:
+        gait_lift_bonus: 0.1
+        gait_replace_bonus: 0.1
+        progress_scale: 15.0
+        action_smooth_coef: 0.01
+        drop_penalty: -50.0
+
+    # Phase 9: All faces — any face to any face (terminal)
+    - name: "ALL_FACES"
+      max_angle: 3.15
+      start_faces: [1, 2, 3, 4, 5, 6]
+      faces: [1, 2, 3, 4, 5, 6]
+      advance_threshold: 0.80
+      min_episodes: 5000
+      min_updates_override: 1500
+      log_std_bounds: [-3.0, -1.0]      # v5: tighter upper bound (was -0.5) — force convergence
+      entropy_coef: 0.0                  # v5: was 0.005 — caused action_std divergence
+      max_episode_steps: 150
+      action_scale: 0.25
+      reward_overrides:
+        gait_lift_bonus: 0.1
+        gait_replace_bonus: 0.1
+        progress_scale: 15.0
+        action_smooth_coef: 0.01
+        drop_penalty: -50.0
+
+domain_rand:
+  enabled: false

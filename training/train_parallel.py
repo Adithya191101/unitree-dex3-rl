@@ -35,6 +35,8 @@ def evaluate_per_face(agent, vec_env, max_steps=110):
     No first-to-finish bias.
     """
     n_envs = vec_env.n_envs
+    # Disable continuous episodes for single-target eval
+    vec_env.set_continuous_episodes(False)
     per_face_sr = {}
     per_face_dr = {}
     per_face_dist = {}
@@ -77,6 +79,10 @@ def evaluate_per_face(agent, vec_env, max_steps=110):
     min_sr = min(per_face_sr.values())
     mean_dr = np.mean(list(per_face_dr.values()))
 
+    # Restore continuous_episodes to training setting (config says False)
+    # BUG FIX: was hardcoded True, silently enabling continuous episodes mid-training
+    vec_env.set_continuous_episodes(False)
+
     return per_face_sr, per_face_dr, per_face_dist, mean_sr, min_sr, mean_dr
 
 
@@ -109,11 +115,12 @@ def train(config_path=None, checkpoint=None, start_phase=0):
     n_envs = config.get("training", {}).get("n_envs", 8)
     xml_path = os.path.join(project_root, config["env"]["xml_path"])
     env_config = {
-        "frameskip": config["env"].get("frameskip", 25),
-        "max_episode_steps": config["env"].get("max_episode_steps", 50),
+        "frameskip": config["env"].get("frameskip", 10),
+        "max_episode_steps": config["env"].get("max_episode_steps", 300),
         "reward": config.get("reward", {}),
         "action_scale": config["env"].get("action_scale", 0.3),
         "use_proxy_contacts": config["env"].get("use_proxy_contacts", False),
+        "continuous_episodes": config["env"].get("continuous_episodes", True),
     }
 
     print(f"Starting {n_envs} parallel environments...")
@@ -156,7 +163,8 @@ def train(config_path=None, checkpoint=None, start_phase=0):
     with open(csv_path, "w") as f:
         f.write("update,timestep,mean_reward,mean_ep_len,success_rate,"
                 "policy_loss,value_loss,entropy,approx_kl,phase,phase_name,"
-                "mean_quat_dist,drop_rate,action_std,eval_sr,eval_min_sr\n")
+                "mean_quat_dist,drop_rate,action_std,eval_sr,eval_min_sr,"
+                "eval_f1,eval_f2,eval_f3,eval_f4,eval_f5,eval_f6\n")
 
     # Multi-phase curriculum
     phases = config.get("curriculum", {}).get("phases", [
@@ -194,19 +202,23 @@ def train(config_path=None, checkpoint=None, start_phase=0):
         if "entropy_coef" in phase:
             agent.entropy_coef = phase["entropy_coef"]
 
-        # Per-phase reward overrides
+        # Per-phase reward overrides (reset to base config first, then apply phase overrides)
+        base_reward = config.get("reward", {}).copy()
         if "reward_overrides" in phase:
-            vec_env.set_reward_overrides(phase["reward_overrides"])
-            print(f"  Reward overrides: {phase['reward_overrides']}")
+            base_reward.update(phase["reward_overrides"])
+        vec_env.set_reward_overrides(base_reward)
+        if "reward_overrides" in phase:
+            tqdm.write(f"  Reward overrides: {phase['reward_overrides']}")
 
-        print(f"\n>>> Phase {phase_idx+1}/{len(phases)}: {phase['name']} "
-              f"(max_angle={phase.get('max_angle', 0.0):.2f} rad, faces={phase['faces']}, "
-              f"start_faces={phase.get('start_faces', 'all')}, "
-              f"advance_sr={phase['advance_threshold']:.0%}, "
-              f"max_steps={phase.get('max_episode_steps', 'default')}, "
-              f"action_scale={phase.get('action_scale', 'default')}, "
-              f"log_std_bounds={phase.get('log_std_bounds', 'default')}, "
-              f"entropy_coef={phase.get('entropy_coef', 'default')})")
+        tqdm.write(f"\n>>> Phase {phase_idx+1}/{len(phases)}: {phase['name']} "
+                   f"(max_angle={phase.get('max_angle', 0.0):.2f} rad, faces={phase['faces']}, "
+                   f"start_faces={phase.get('start_faces', 'all')}, "
+                   f"advance_sr={phase['advance_threshold']:.0%}, "
+                   f"min_updates={phase.get('min_updates_override', 'default')}, "
+                   f"max_steps={phase.get('max_episode_steps', 'default')}, "
+                   f"action_scale={phase.get('action_scale', 'default')}, "
+                   f"log_std_bounds={phase.get('log_std_bounds', 'default')}, "
+                   f"entropy_coef={phase.get('entropy_coef', 'default')})")
 
     # Training config
     total_updates = ppo_cfg.get("total_updates", 10000)
@@ -223,6 +235,7 @@ def train(config_path=None, checkpoint=None, start_phase=0):
     best_eval_sr = 0.0
     last_eval_sr = 0.0
     last_eval_face_sr = {}  # Per-face eval SR dict {1: sr, 2: sr, ...}
+    last_eval_min_sr = 0.0
 
     # Episode tracking — per-phase windows
     phase_ep_successes = []
@@ -275,10 +288,19 @@ def train(config_path=None, checkpoint=None, start_phase=0):
             if agent.normalize_obs and not freeze_obs_norm:
                 agent.obs_rms.update(obs)
 
-            # Store one step for all envs at once
-            agent.buffer.add_step(obs_norm, actions, log_probs, rewards, dones, values)
+            # Reward normalization: scale by running std to stabilize value targets
+            # Raw rewards used for episode tracking; normalized rewards for PPO buffer
+            if agent.normalize_reward:
+                agent.reward_rms.update(rewards.reshape(-1, 1))
+                reward_std = np.sqrt(agent.reward_rms.var.item()) + 1e-8
+                rewards_for_buffer = rewards / reward_std
+            else:
+                rewards_for_buffer = rewards
 
-            # Episode tracking
+            # Store one step for all envs at once
+            agent.buffer.add_step(obs_norm, actions, log_probs, rewards_for_buffer, dones, values)
+
+            # Episode tracking (raw rewards, not normalized)
             env_ep_rewards += rewards
             env_ep_lengths += 1
             total_timesteps += n_envs
@@ -290,7 +312,9 @@ def train(config_path=None, checkpoint=None, start_phase=0):
 
             done_indices = np.where(dones)[0]
             for i in done_indices:
-                success = 1.0 if infos[i].get("achieved_goal", False) else 0.0
+                # With continuous episodes, success = achieved at least one goal
+                successes_count = infos[i].get("successes", 0)
+                success = 1.0 if (successes_count > 0 or infos[i].get("achieved_goal", False)) else 0.0
                 ep_rewards.append(env_ep_rewards[i])
                 ep_lengths.append(env_ep_lengths[i])
                 ep_successes.append(success)
@@ -358,19 +382,20 @@ def train(config_path=None, checkpoint=None, start_phase=0):
         if update % eval_interval == 0:
             phase_max_steps = phases[current_phase].get("max_episode_steps", 50) + 10
 
-            face_sr, face_dr, face_dist, eval_mean_sr, eval_min_sr, eval_mean_dr = \
+            face_sr, face_dr, face_dist, eval_mean_sr, eval_min_sr_now, eval_mean_dr = \
                 evaluate_per_face(agent, vec_env, max_steps=phase_max_steps)
 
             last_eval_sr = eval_mean_sr
+            last_eval_min_sr = eval_min_sr_now
             last_eval_face_sr = face_sr  # Store per-face results for phase-aware advancement
 
             face_str = " ".join([f"F{f}:{face_sr[f]:.0%}" for f in range(1, 7)])
-            print(f"\n  [EVAL] update={update} mean_SR={eval_mean_sr:.1%} "
-                  f"min_SR={eval_min_sr:.1%} DR={eval_mean_dr:.1%} | {face_str}")
+            tqdm.write(f"  [EVAL] update={update} mean_SR={eval_mean_sr:.1%} "
+                       f"min_SR={last_eval_min_sr:.1%} DR={eval_mean_dr:.1%} | {face_str}")
 
             if writer:
                 writer.add_scalar("eval/mean_success_rate", eval_mean_sr, total_timesteps)
-                writer.add_scalar("eval/min_success_rate", eval_min_sr, total_timesteps)
+                writer.add_scalar("eval/min_success_rate", last_eval_min_sr, total_timesteps)
                 writer.add_scalar("eval/drop_rate", eval_mean_dr, total_timesteps)
                 for f in range(1, 7):
                     writer.add_scalar(f"eval/face_{f}_sr", face_sr[f], total_timesteps)
@@ -379,7 +404,7 @@ def train(config_path=None, checkpoint=None, start_phase=0):
             if eval_mean_sr > best_eval_sr:
                 best_eval_sr = eval_mean_sr
                 agent.save(os.path.join(checkpoint_dir, "best_eval_model.pt"))
-                print(f"  [BEST] New best eval SR: {eval_mean_sr:.1%} (min={eval_min_sr:.1%})")
+                tqdm.write(f"  [BEST] New best eval SR: {eval_mean_sr:.1%} (min={last_eval_min_sr:.1%})")
 
             # Re-reset envs after eval (eval changed available_faces)
             vec_env.set_available_faces(phases[current_phase]["faces"])
@@ -412,6 +437,8 @@ def train(config_path=None, checkpoint=None, start_phase=0):
                                   np.mean(list(ep_gait_replaces)[-100:]), total_timesteps)
 
         if update % log_interval == 0:
+            # Per-face eval SR for CSV (use last known values)
+            f_srs = [last_eval_face_sr.get(f, 0.0) for f in range(1, 7)]
             with open(csv_path, "a") as f:
                 f.write(f"{update},{total_timesteps},{mean_reward:.4f},"
                         f"{mean_ep_len:.1f},{success_rate:.4f},"
@@ -419,7 +446,8 @@ def train(config_path=None, checkpoint=None, start_phase=0):
                         f"{stats['entropy']:.6f},{stats['approx_kl']:.6f},"
                         f"{current_phase+1},{phase_name},"
                         f"{mean_quat_dist:.4f},{drop_rate:.4f},{action_std:.4f},"
-                        f"{last_eval_sr:.4f},{eval_min_sr if update % eval_interval == 0 else 0:.4f}\n")
+                        f"{last_eval_sr:.4f},{last_eval_min_sr:.4f},"
+                        f"{','.join(f'{s:.4f}' for s in f_srs)}\n")
 
         if update % checkpoint_interval == 0:
             agent.save(os.path.join(checkpoint_dir, f"ppo_update_{update}.pt"))
@@ -429,37 +457,39 @@ def train(config_path=None, checkpoint=None, start_phase=0):
             agent.save(os.path.join(checkpoint_dir, "best_model.pt"))
 
         # Phase advancement check
-        # Use eval_sr (deterministic) for advancement — more stable than noisy training SR
-        # IMPORTANT: Only average the phase's target faces, not all 6
-        # (e.g., FULL_ROT trains face 1 only — don't dilute with untrained faces 2-6)
+        # v5 FIX: ONLY use eval SR for advancement — training SR is too noisy and caused
+        # phases to race through in v4b (all 6 phases done in 595 updates, policy unprepared)
         phase = phases[current_phase]
         updates_in_phase = update - phase_start_update + 1
         min_updates_in_phase = phase.get("min_updates_override",
-                                         max(10, phase.get("min_episodes", 100) // 40))
+                                         max(50, phase.get("min_episodes", 100) // 40))
         if last_eval_face_sr:
             phase_faces = phase["faces"]
             phase_eval_sr = np.mean([last_eval_face_sr.get(f, 0.0) for f in phase_faces])
         else:
             phase_eval_sr = 0.0
-        advance_sr = phase_eval_sr if phase_eval_sr > 0 else phase_sr
+        # v5: NO fallback to training SR — eval_sr MUST be positive
+        advance_sr = phase_eval_sr
         if (advance_sr >= phase["advance_threshold"]
                 and phase_ep_count >= phase.get("min_episodes", 100)
                 and updates_in_phase >= min_updates_in_phase
                 and current_phase < len(phases) - 1):
-            print(f"\n>>> Phase {current_phase+1} COMPLETE: {phase_name} "
-                  f"eval_SR={last_eval_sr:.1%} train_SR={phase_sr:.1%} "
-                  f"after {phase_ep_count} episodes, {updates_in_phase} updates")
+            tqdm.write(f"\n>>> Phase {current_phase+1} COMPLETE: {phase_name} "
+                       f"eval_SR={last_eval_sr:.1%} train_SR={phase_sr:.1%} "
+                       f"after {phase_ep_count} episodes, {updates_in_phase} updates")
             agent.save(os.path.join(checkpoint_dir,
                                     f"phase_{current_phase+1}_{phase_name}.pt"))
 
             current_phase += 1
             apply_phase(current_phase)
+            agent.buffer.reset()  # Defensive: ensure no stale data from previous phase
 
             # Reset phase tracking
             phase_ep_successes = []
             phase_ep_count = 0
             phase_start_update = update + 1
             last_eval_sr = 0.0  # Reset eval SR — stale values from old phase must not carry over
+            last_eval_min_sr = 0.0
             last_eval_face_sr = {}  # Reset per-face SR too
 
             # Reset all envs with new phase settings

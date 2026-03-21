@@ -350,23 +350,32 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Dex3-1 Dice Interactive Viewer")
     parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--config", type=str, default=None,
+                        help="Config YAML (default: configs/ppo_v2_runpod.yaml)")
     args = parser.parse_args()
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     mjx_xml = os.path.join(project_root, "models", "dex3_dice_scene_mjx.xml")
     render_xml = os.path.join(project_root, "models", "dex3_dice_scene_torque.xml")
-    config_path = os.path.join(project_root, "configs", "ppo_mjx_config.yaml")
+    config_path = args.config or os.path.join(
+        project_root, "configs", "ppo_v2_runpod.yaml")
 
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
+    # Use final curriculum phase overrides (matches training conditions)
+    phases = config.get("curriculum", {}).get("phases", [])
+    final_phase = phases[-1] if phases else {}
+    action_scale = final_phase.get("action_scale", config["env"].get("action_scale", 0.3))
+
     agent = PPO(48, 7, config=config, device="cpu")
     agent.load(args.checkpoint)
     print(f"Loaded: {args.checkpoint}")
+    print(f"action_scale={action_scale}")
 
     env_config = {
         "frameskip": config["env"].get("frameskip", 10),
-        "action_scale": config["env"].get("action_scale", 0.3),
+        "action_scale": action_scale,
     }
 
     viewer = DexCubeViewer(agent, mjx_xml, render_xml, env_config)

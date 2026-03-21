@@ -1,6 +1,8 @@
 """DexCubeEnv: Unitree Dex3-1 hand + dice reorientation environment.
 
-Uses MuJoCo native position actuators (kp=5, dampratio=1) — action=0 holds the cube.
+v4: Residual position control (stable).
+  ctrl = grip_qpos + action * action_scale   (action=0 holds at grip)
+  No drift, bounded workspace, proven stable.
 """
 
 import os
@@ -50,7 +52,9 @@ class DexCubeEnv:
         - contact_forces (3): normal force per fingertip
 
     Action space (7 dims):
-        - Residual position targets in [-1, 1], applied via native position actuators
+        - Residual position offsets in [-1, 1]
+        - ctrl = grip_qpos + action * action_scale (bounded, no drift)
+        - action=0 holds at grip_qpos (stable equilibrium)
     """
 
     def __init__(self, xml_path=None, config=None):
@@ -64,8 +68,8 @@ class DexCubeEnv:
         self.data = mujoco.MjData(self.model)
 
         self.config = config or {}
-        self.frameskip = self.config.get("frameskip", 25)
-        self.max_episode_steps = self.config.get("max_episode_steps", 50)
+        self.frameskip = self.config.get("frameskip", 10)
+        self.max_episode_steps = self.config.get("max_episode_steps", 300)
         self.use_proxy_contacts = self.config.get("use_proxy_contacts", False)
 
         # Cache IDs
@@ -122,11 +126,18 @@ class DexCubeEnv:
         self.joint_lo = np.array([self.model.jnt_range[jid, 0] for jid in self.hand_joint_ids])
         self.joint_hi = np.array([self.model.jnt_range[jid, 1] for jid in self.hand_joint_ids])
 
-        # Grip configuration
-        self.grip_qpos = np.array([-0.419, -0.339, -1.047, 1.100, 1.222, 1.100, 1.222])
+        # Grip configuration — tripod cradle grip (fingers contact cube sides, not top)
+        # Tuned via scripts/tune_grip.py with kp=50, per-joint forcerange (menagerie-calibrated)
+        self.grip_qpos = np.array([-0.5, -0.4, -1.2, 0.85, 0.8, 0.85, 0.8])
 
-        # Action scaling (radians of position offset per action unit)
+        # Residual position control: ctrl = grip_qpos + action * action_scale
+        # action=0 holds at grip. No drift, bounded workspace.
         self.action_scale = self.config.get("action_scale", 0.3)
+
+        # Continuous episodes: DISABLED — creates non-stationary value targets
+        # that prevent PPO's critic from converging (see DEBUG_PLAN P1)
+        self.continuous_episodes = self.config.get("continuous_episodes", False)
+        self.successes_in_episode = 0
 
         # State
         self.target_face = 1
@@ -171,6 +182,10 @@ class DexCubeEnv:
     def set_action_scale(self, scale):
         self.action_scale = float(scale)
 
+    def set_continuous_episodes(self, enabled):
+        """Toggle continuous episodes (False for evaluation)."""
+        self.continuous_episodes = bool(enabled)
+
     def set_reward_config(self, overrides):
         """Update reward config with per-phase overrides."""
         self.reward_config.update(overrides)
@@ -210,6 +225,7 @@ class DexCubeEnv:
         self.prev_cube_quat = self._get_cube_quat().copy()
         self.prev_quat_dist = quat_distance(self.prev_cube_quat, self.target_quat)
         self.goal_achieved = False
+        self.successes_in_episode = 0
 
         # Init gait state from ACTUAL contact after grip settle (prevents spurious events)
         self.prev_per_finger_contact = self._get_per_finger_contact()
@@ -218,9 +234,14 @@ class DexCubeEnv:
         return self._get_obs()
 
     def _reset_grip(self, cube_pos, cube_quat):
-        """Establish grip using position actuators then settle."""
-        # Set initial joint positions (open hand)
-        open_qpos = np.array([-0.2, -0.5, -0.3, 0.5, 0.5, 0.5, 0.5])
+        """Establish tripod grip with gradual release to prevent pop-out.
+
+        Three phases:
+        1. Close: interpolate fingers from open to grip while holding cube kinematically
+        2. Gradual release: ramp down external support force over 100 steps
+        3. Settle: free dynamics, fingers hold cube under gravity alone
+        """
+        open_qpos = np.zeros(7)
 
         for i, adr in enumerate(self.hand_qpos_adr):
             self.data.qpos[adr] = open_qpos[i]
@@ -229,32 +250,41 @@ class DexCubeEnv:
         self.data.qpos[self.cube_qpos_adr + 3: self.cube_qpos_adr + 7] = cube_quat
         self.data.qvel[self.cube_qvel_adr: self.cube_qvel_adr + 6] = 0
 
-        # Phase 1: Close by interpolating target from open_qpos to grip_qpos
+        # Phase 1: Close fingers around cube (300 steps, kinematic hold)
         for step in range(300):
             t = min(step / 200.0, 1.0)
             target = open_qpos + t * (self.grip_qpos - open_qpos)
             self.data.ctrl[:self.n_hand_joints] = target
 
-            # Hold cube in place during grasp
             self.data.qpos[self.cube_qpos_adr: self.cube_qpos_adr + 3] = cube_pos
             self.data.qpos[self.cube_qpos_adr + 3: self.cube_qpos_adr + 7] = cube_quat
             self.data.qvel[self.cube_qvel_adr: self.cube_qvel_adr + 6] = 0
             mujoco.mj_step(self.model, self.data)
 
-        # Phase 2: Release cube, hold at grip_qpos and let settle
+        # Phase 2: Gradual release — ramp down external support force (100 steps)
+        # Prevents shock when transitioning from kinematic to dynamic cube
+        cube_weight = 0.05 * 9.81  # mass * gravity
         self.data.ctrl[:self.n_hand_joints] = self.grip_qpos
-        for _ in range(100):
+        for step in range(100):
+            alpha = 1.0 - step / 100.0
+            self.data.xfrc_applied[self.cube_body_id][2] = alpha * cube_weight
+            mujoco.mj_step(self.model, self.data)
+        self.data.xfrc_applied[self.cube_body_id][:] = 0
+
+        # Phase 3: Free settle — fingers hold cube under gravity (300 steps)
+        self.data.ctrl[:self.n_hand_joints] = self.grip_qpos
+        for _ in range(300):
             mujoco.mj_step(self.model, self.data)
 
     def step(self, action):
         """Take action (7-dim, in [-1, 1]) via native position actuators."""
         action = np.clip(action, -1.0, 1.0)
 
-        # Native position control: action=0 → hold at grip_qpos
-        # MuJoCo position actuator internally computes: force = kp*(ctrl - qpos) - kd*qvel
-        target_qpos = self.grip_qpos + action * self.action_scale
-        target_qpos = np.clip(target_qpos, self.joint_lo, self.joint_hi)
-        self.data.ctrl[:self.n_hand_joints] = target_qpos
+        # Residual position control: action=0 → hold at grip_qpos (stable)
+        # ctrl = grip_qpos + action * action_scale (bounded, no drift)
+        ctrl = self.grip_qpos + action * self.action_scale
+        ctrl = np.clip(ctrl, self.joint_lo, self.joint_hi)
+        self.data.ctrl[:self.n_hand_joints] = ctrl
 
         # Step physics
         for _ in range(self.frameskip):
@@ -299,30 +329,44 @@ class DexCubeEnv:
         # Update gait contact state
         self.prev_per_finger_contact = list(per_finger_contact)
 
-        # One-time goal bonus
+        # Goal bonus (awarded each time goal is newly achieved)
         if info["achieved_goal"] and not self.goal_achieved:
             self.goal_achieved = True
+            self.successes_in_episode += 1
             goal_bonus = self.reward_config.get("goal_bonus", 100.0)
             reward += goal_bonus
             info["r_goal"] = goal_bonus
+
+            # Continuous episodes: sample new target (exclude current to prevent free bonus)
+            if self.continuous_episodes:
+                current_face = self.get_current_top_face()
+                other_faces = [f for f in range(1, 7) if f != current_face]
+                new_face = int(np.random.choice(other_faces))
+                self.set_target_face(new_face)
+                self.goal_achieved = False  # Allow new goal achievement
+                self.prev_quat_dist = quat_distance(self._get_cube_quat(), self.target_quat)
 
         # Check termination
         done = False
         if info["dropped"]:
             done = True
-        if info["achieved_goal"]:
-            done = True  # Early success termination
+        if not self.continuous_episodes and info["achieved_goal"]:
+            done = True  # Only terminate on goal in non-continuous mode
         if self.step_count >= self.max_episode_steps:
             done = True
 
         info["step"] = self.step_count
         info["target_face"] = self.target_face
         info["current_face"] = self.get_current_top_face()
-        info["truncated"] = self.step_count >= self.max_episode_steps and not info["dropped"] and not info["achieved_goal"]
+        info["successes"] = self.successes_in_episode
+        info["truncated"] = self.step_count >= self.max_episode_steps and not info["dropped"]
 
         self.prev_action = action.copy()
         self.prev_cube_quat = cube_quat.copy()
-        self.prev_quat_dist = info["quat_dist"]
+        # Only update prev_quat_dist if no continuous target switch happened this step
+        # (the goal transition block already set it against the NEW target)
+        if not (self.continuous_episodes and info.get("r_goal", 0) > 0):
+            self.prev_quat_dist = info["quat_dist"]
 
         return self._get_obs(), reward, done, info
 
@@ -394,7 +438,7 @@ class DexCubeEnv:
                     mujoco.mj_contactForce(self.model, self.data, i, c_force)
                     forces[j] += abs(c_force[0])  # Normal force magnitude
         # Normalize to reasonable range
-        forces = np.clip(forces / 5.0, 0.0, 1.0)
+        forces = np.clip(forces / 2.5, 0.0, 1.0)
         return forces
 
     def _get_per_finger_contact(self):
@@ -442,16 +486,6 @@ class DexCubeEnv:
             w1*y2 - x1*z2 + y1*w2 + z1*x2,
             w1*z2 + x1*y2 - y1*x2 + z1*w2,
         ])
-
-    def _random_quaternion(self):
-        u = np.random.uniform(0, 1, 3)
-        q = np.array([
-            np.sqrt(1 - u[0]) * np.sin(2 * np.pi * u[1]),
-            np.sqrt(1 - u[0]) * np.cos(2 * np.pi * u[1]),
-            np.sqrt(u[0]) * np.sin(2 * np.pi * u[2]),
-            np.sqrt(u[0]) * np.cos(2 * np.pi * u[2]),
-        ])
-        return q / np.linalg.norm(q)
 
     def render_camera(self, camera_name="top_cam", width=256, height=256):
         if self._renderer is None:
